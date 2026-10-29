@@ -1,0 +1,22 @@
+# Allow filesystem association for media_rw_data_file and unlabeled
+allow media_rw_data_file media_rw_data_file filesystem *
+allow unlabeled media_rw_data_file filesystem *
+allow init media_rw_data_file filesystem *
+allow ksu media_rw_data_file filesystem *
+
+# Allow MediaProvider, system apps, and standard user apps full access to media_rw_data_file and unlabeled
+allow mediaprovider_app unlabeled dir *
+allow mediaprovider_app unlabeled file *
+allow mediaprovider_app media_rw_data_file dir *
+allow mediaprovider_app media_rw_data_file file *
+
+allow appdomain media_rw_data_file dir *
+allow appdomain media_rw_data_file file *
+allow untrusted_app_all media_rw_data_file dir *
+allow untrusted_app_all media_rw_data_file file *
+allow priv_app media_rw_data_file dir *
+allow priv_app media_rw_data_file file *
+
+# Allow sdcardd / fuse to associate unlabeled files on filesystem
+allow fuse unlabeled filesystem *
+allow sdcardd unlabeled filesystem *

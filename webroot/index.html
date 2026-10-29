@@ -1,0 +1,1412 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Mount Ubuntu Data</title>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --card: #ffffff;
+      --text: #16181d;
+      --muted: #667085;
+      --line: #e3e6ec;
+      --accent: #2563eb;
+      --accent-text: #ffffff;
+      --ok: #16a34a;
+      --bad: #dc2626;
+      --warn: #d97706;
+      --idle: #98a2b3;
+      --danger: #dc2626;
+      --warn-text: #92400e;
+      --warn-bg: #fff4dc;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e1116;
+        --card: #171b22;
+        --text: #e8eaee;
+        --muted: #98a2b3;
+        --line: #262c36;
+        --accent: #5b8def;
+        --accent-text: #0b0f16;
+        --ok: #34d399;
+        --bad: #f87171;
+        --warn: #fbbf24;
+        --idle: #667085;
+        --danger: #f87171;
+        --warn-text: #fcd34d;
+        --warn-bg: #2a2110;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 20px 20px calc(24px + env(safe-area-inset-bottom));
+    }
+
+    header {
+      padding: 4px 2px 16px;
+    }
+
+    h1 {
+      font-size: 24px;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 14px;
+      margin-top: 3px;
+    }
+
+    .layout-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    @media (min-width: 640px) {
+      .layout-grid {
+        grid-template-columns: repeat(12, 1fr);
+        align-items: start;
+      }
+
+      .col-left {
+        grid-column: span 6;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .col-right {
+        grid-column: span 6;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .card {
+        margin-bottom: 0;
+      }
+    }
+
+    @media (min-width: 980px) {
+      .col-left {
+        grid-column: span 5;
+      }
+
+      .col-right {
+        grid-column: span 7;
+      }
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 14px;
+    }
+
+    .state {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--idle);
+      flex: none;
+    }
+
+    .dot.mounted {
+      background: var(--ok);
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent);
+    }
+
+    .dot.unmounted,
+    .dot.error {
+      background: var(--bad);
+    }
+
+    .dot.waiting,
+    .dot.conflict {
+      background: var(--warn);
+    }
+
+    .state b {
+      font-size: 18px;
+    }
+
+    .meter {
+      height: 8px;
+      border-radius: 99px;
+      background: var(--line);
+      overflow: hidden;
+      margin: 14px 0 6px;
+    }
+
+    .meter>i {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+      transition: width .4s;
+    }
+
+    .meter-l {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 14px;
+      margin: 14px 0 0;
+      font-size: 13px;
+    }
+
+    dt {
+      color: var(--muted);
+    }
+
+    dd {
+      margin: 0;
+      text-align: right;
+      word-break: break-all;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .err {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      background: color-mix(in srgb, var(--bad) 12%, transparent);
+      color: var(--bad);
+    }
+
+    button {
+      font: inherit;
+      border: 0;
+      border-radius: 12px;
+      cursor: pointer;
+      color: var(--text);
+      background: var(--line);
+      padding: 11px 14px;
+    }
+
+    button:disabled {
+      opacity: .45;
+      cursor: default;
+    }
+
+    button.primary {
+      width: 100%;
+      padding: 14px;
+      font-weight: 600;
+      background: var(--accent);
+      color: var(--accent-text);
+      font-size: 16px;
+    }
+
+    button.primary.danger {
+      background: var(--danger);
+      color: #fff;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .row small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .tools {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    h2 {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      margin: 0 0 10px;
+      font-weight: 600;
+    }
+
+    .sw {
+      position: relative;
+      width: 48px;
+      height: 28px;
+      flex: none;
+    }
+
+    .sw input {
+      opacity: 0;
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      margin: 0;
+      cursor: pointer;
+      z-index: 1;
+    }
+
+    .sw span {
+      position: absolute;
+      inset: 0;
+      border-radius: 99px;
+      background: var(--line);
+      transition: .2s;
+    }
+
+    .sw span::after {
+      content: "";
+      position: absolute;
+      width: 22px;
+      height: 22px;
+      top: 3px;
+      left: 3px;
+      border-radius: 50%;
+      background: #fff;
+      transition: .2s;
+    }
+
+    .sw input:checked+span {
+      background: var(--accent);
+    }
+
+    .sw input:checked+span::after {
+      transform: translateX(20px);
+    }
+
+    pre {
+      margin: 0;
+      padding: 12px;
+      border-radius: 10px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 280px;
+      overflow: auto;
+    }
+
+    .banner {
+      padding: 12px 14px;
+      border-radius: 12px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      background: color-mix(in srgb, var(--warn) 14%, transparent);
+      color: var(--text);
+      border: 1px solid var(--warn);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .ent {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .ent:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .ent .meta {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .ent .meta b {
+      display: block;
+    }
+
+    .ent .meta small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    .pill {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 99px;
+      background: var(--line);
+      color: var(--muted);
+      margin-left: 6px;
+      font-weight: 500;
+    }
+
+    .pill.on {
+      background: color-mix(in srgb, var(--ok) 20%, transparent);
+      color: var(--ok);
+    }
+
+    .ent button {
+      padding: 8px 12px;
+      font-size: 13px;
+    }
+
+    .ent .x {
+      background: transparent;
+      color: var(--muted);
+      padding: 8px 10px;
+    }
+
+    .ent .st {
+      background: transparent;
+      border: 0;
+      padding: 0 4px;
+      margin-left: 4px;
+      min-height: 0;
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1;
+      vertical-align: middle;
+      cursor: pointer;
+    }
+
+    .st.ok { color: var(--ok); }
+    .st.fail { color: var(--bad); }
+    .st.warn { color: var(--warn); }
+    .st.busy { color: var(--muted); font-weight: 400; }
+
+    .form select:disabled {
+      opacity: .55;
+      cursor: not-allowed;
+    }
+
+    .form .chk {
+      align-items: flex-start;
+    }
+
+    .form .chk small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+      line-height: 1.35;
+    }
+
+    .form .chk input {
+      flex: none;
+      margin-top: 2px;
+    }
+
+    #fCancel {
+      width: 100%;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    details {
+      margin-top: 12px;
+    }
+
+    summary {
+      cursor: pointer;
+      color: var(--accent);
+      font-size: 14px;
+    }
+
+    .form {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .form label {
+      display: grid;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .form input[type=text],
+    .form select {
+      font: inherit;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      width: 100%;
+    }
+
+    .form .chk {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    #toast {
+      position: fixed;
+      left: 50%;
+      bottom: calc(20px + env(safe-area-inset-bottom));
+      transform: translate(-50%, 20px);
+      background: var(--text);
+      color: var(--bg);
+      padding: 10px 16px;
+      border-radius: 99px;
+      font-size: 13px;
+      opacity: 0;
+      pointer-events: none;
+      transition: .25s;
+      max-width: 90vw;
+    }
+
+    #toast.show {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+
+    #modal,
+    #picker {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 5;
+    }
+
+    #modal .box,
+    #picker .box {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 20px;
+      max-width: min(90vw, 540px);
+      width: 100%;
+    }
+
+    #modal p {
+      margin: 0 0 16px;
+      white-space: pre-line;
+    }
+
+    #picker .box {
+      max-width: min(90vw, 640px);
+      max-height: 88vh;
+      display: flex;
+      flex-direction: column;
+      padding: 20px;
+    }
+
+    #picker h3 {
+      margin: 0 0 10px;
+      font-size: 16px;
+    }
+
+    #picker select,
+    #picker input[type=text] {
+      font: inherit;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 12px;
+      width: 100%;
+    }
+
+    #pkPath {
+      margin: 10px 0 8px;
+      font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
+    #pkList {
+      flex: 1;
+      min-height: 160px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--bg);
+    }
+
+    .pk {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      text-align: left;
+      border-radius: 0;
+      background: transparent;
+      border-top: 1px solid var(--line);
+      padding: 12px;
+      word-break: break-all;
+    }
+
+    .pk:first-child {
+      border-top: 0;
+    }
+
+    .pk:disabled {
+      opacity: .4;
+    }
+
+    .pk .ic {
+      flex: none;
+    }
+
+    #pkNew {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    #pkNew button {
+      flex: none;
+    }
+
+    #picker .btns {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+
+    .pickrow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pickrow .val {
+      flex: 1;
+      min-width: 0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      font-size: 13px;
+      word-break: break-all;
+      color: var(--muted);
+    }
+
+    .pickrow .val.set {
+      color: var(--text);
+    }
+
+    .pickrow button {
+      flex: none;
+    }
+
+    .lbl {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    a.btn {
+      display: inline-block;
+      text-decoration: none;
+      color: var(--accent-text);
+      background: var(--accent);
+      border-radius: 12px;
+      padding: 11px 14px;
+      font-weight: 600;
+      flex: none;
+    }
+
+    .banner.inline {
+      margin: 12px 0 0;
+    }
+
+    #modal .btns {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    /* ---- warning (Pad 3 only) ------------------------------------------------ */
+    .warning {
+      padding: 14px 16px;
+      border-radius: 14px;
+      background: var(--warn-bg);
+      border: 2px solid var(--warn);
+      color: var(--text);
+    }
+
+    .warning-title {
+      color: var(--warn-text);
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .warning p {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .warning a {
+      color: var(--warn-text);
+      font-weight: 600;
+      text-decoration: underline;
+    }
+
+    /* ---- tablet / touch (OnePlus Pad 3, 12.1" 3:2 panel) ------------------------ */
+    html {
+      -webkit-text-size-adjust: 100%;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    button,
+    summary,
+    .sw input {
+      touch-action: manipulation;
+    }
+
+    button {
+      min-height: 46px;
+    }
+
+    .sw {
+      width: 56px;
+      height: 32px;
+    }
+
+    .sw span::after {
+      width: 26px;
+      height: 26px;
+    }
+
+    .sw input:checked+span::after {
+      transform: translateX(24px);
+    }
+
+    summary {
+      padding: 10px 0;
+    }
+
+    .form input[type=text],
+    .form select,
+    #picker select,
+    #picker input[type=text] {
+      min-height: 46px;
+      font-size: 16px;
+    }
+
+    .form .chk {
+      min-height: 44px;
+    }
+
+    .form .chk input {
+      width: 22px;
+      height: 22px;
+    }
+
+    .ent button {
+      min-height: 44px;
+    }
+
+    .pk {
+      min-height: 52px;
+    }
+
+    @media (min-width: 640px) {
+
+      html,
+      body {
+        font-size: 16px;
+      }
+
+      main {
+        max-width: 1280px;
+        padding: calc(24px + env(safe-area-inset-top)) calc(24px + env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) calc(24px + env(safe-area-inset-left));
+      }
+
+      h1 {
+        font-size: 30px;
+      }
+
+      .sub {
+        font-size: 15px;
+      }
+
+      .layout-grid,
+      .col-left,
+      .col-right {
+        gap: 18px;
+      }
+
+      .card {
+        padding: 22px;
+        border-radius: 18px;
+      }
+
+      .state b {
+        font-size: 20px;
+      }
+
+      dl {
+        font-size: 14px;
+        gap: 8px 16px;
+      }
+
+      .err {
+        font-size: 14px;
+      }
+
+      button.primary {
+        min-height: 60px;
+        font-size: 18px;
+        border-radius: 16px;
+      }
+
+      .tools {
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 10px;
+      }
+
+      .tools button {
+        min-height: 54px;
+      }
+
+      pre {
+        font-size: 13px;
+        max-height: min(42vh, 380px);
+      }
+
+      #modal .box,
+      #picker .box {
+        padding: 26px;
+        border-radius: 20px;
+      }
+
+      #modal p {
+        font-size: 16px;
+      }
+
+      #modal .btns button,
+      #picker .btns button {
+        min-height: 50px;
+      }
+
+      #toast {
+        font-size: 15px;
+        padding: 12px 20px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <header>
+      <h1>Mount Ubuntu Data</h1>
+      <div class="sub">Shared ext4 partition for Android and Ubuntu · by zen</div>
+    </header>
+
+    <div id="nobridge" class="banner hidden">
+      This page needs root access to run commands. Open it from the module's WebUI button in the
+      KernelSU manager (or WebUI&nbsp;X / KsuWebUI if you use Magisk).
+    </div>
+
+    <div class="layout-grid">
+      <div class="col-left">
+        <section class="card">
+          <div class="state"><span id="dot" class="dot"></span><b id="stateText">Loading…</b></div>
+          <div id="meterWrap" class="hidden">
+            <div class="meter"><i id="meter"></i></div>
+            <div class="meter-l"><span id="usedL"></span><span id="freeL"></span></div>
+          </div>
+          <dl>
+            <dt>Partition</dt>
+            <dd id="vDev">–</dd>
+            <dt>Filesystem</dt>
+            <dd id="vFs">–</dd>
+            <dt>Detected as</dt>
+            <dd id="vLayout">–</dd>
+            <dt>Android path</dt>
+            <dd id="vSd">–</dd>
+            <dt>Visible in Android</dt>
+            <dd id="vView">–</dd>
+            <dt>Extra bind mounts</dt>
+            <dd id="vBinds">–</dd>
+          </dl>
+          <div id="err" class="err hidden"></div>
+        </section>
+
+        <div class="warning" role="alert">
+          <div class="warning-title"><span aria-hidden="true">⚠</span> OnePlus Pad 3 only</div>
+          <p>This module is created for <a href="https://github.com/TheMojoMan/oneplus-erhai-ubuntu" target="_blank"
+              rel="noopener noreferrer">Ubuntu Linux</a> on OnePlus Pad 3 only. Flashing on other devices may cause
+            hard brick.</p>
+        </div>
+
+        <button id="main" class="primary" disabled>…</button>
+
+        <section class="card">
+          <div class="row">
+            <div>Mount automatically on boot<small>After the first unlock</small></div>
+            <label class="sw"><input id="auto" type="checkbox"><span></span></label>
+          </div>
+        </section>
+
+
+        <section class="card">
+          <h2>Support</h2>
+          <div class="row">
+            <div>Questions, bugs or ideas?<small>Telegram: t.me/kokernel</small></div>
+            <a id="support" class="btn" href="https://t.me/kokernel" target="_blank"
+              rel="noopener noreferrer">Telegram</a>
+          </div>
+        </section>
+      </div>
+
+      <div class="col-right">
+        <section class="card">
+          <h2>Folder mounts</h2>
+          <div id="entries">
+            <div class="empty">No folder mounts yet.</div>
+          </div>
+          <details id="addbox">
+            <summary id="addSum">Add folder mount</summary>
+            <div class="form">
+              <label>Name<input id="fId" type="text" placeholder="game1" autocapitalize="off"
+                  autocomplete="off"></label>
+              <div>
+                <div class="lbl">Folder A (source, e.g. inside the Ubuntu partition)</div>
+                <div class="pickrow">
+                  <div id="fSrcV" class="val">Not selected</div><button id="fSrcB" type="button">Select…</button>
+                </div>
+              </div>
+              <div>
+                <div class="lbl">Folder B (destination, e.g. the game's folder in internal storage)</div>
+                <div class="pickrow">
+                  <div id="fDstV" class="val">Not selected</div><button id="fDstB" type="button">Select…</button>
+                </div>
+              </div>
+              <label>Method
+                <select id="fMode">
+                  <option value="bind">Bind mount (real mount, works everywhere)</option>
+                  <option value="vfs">Hybrid Mount VFS redirect (no mount entry, experimental)</option>
+                  <option value="auto">Auto (VFS if available, else bind)</option>
+                </select></label>
+              <label class="chk"><input id="fOwner" type="checkbox"><span>Let the target app read and write folder A
+                  <small>Folder mounts are mounted read-write, and folder A is made writable for Android (group media_rw). Turn this on when folder B is an app's own folder (<code>Android/data/&lt;package&gt;</code> or <code>Android/obb/&lt;package&gt;</code>): that app can write too. Files stay owned by your Ubuntu user.</small></span></label>
+              <label class="chk"><input id="fStop" type="checkbox"><span>Stop the app when mounting/unmounting
+                  <small>Force-stops the app so it picks up the new folder instead of keeping the old view.</small></span></label>
+              <label class="chk"><input id="fAuto" type="checkbox" checked><span>Mount at boot</span></label>
+              <div id="fHint" class="hint"></div>
+              <button id="fAdd" class="primary">Add</button>
+              <button id="fCancel" type="button" class="hidden">Cancel editing</button>
+            </div>
+          </details>
+        </section>
+
+        <section class="card">
+          <h2>Tools</h2>
+          <div class="tools">
+            <button id="bAccess">Access test</button>
+            <button id="bRead">Make readable</button>
+            <button id="bWrite">Make writable</button>
+            <button id="bFsck">Check filesystem</button>
+            <button id="bMedia">Reset media provider</button>
+            <button id="bDiag">Diagnostics</button>
+            <button id="bLog" style="grid-column: 1 / -1">Show log</button>
+          </div>
+          <div class="hint" style="margin-top:10px">Files not opening in a non-root file manager?<br>Run <b>Access
+              test</b>, then <b>Make readable</b> (or <b>Make writable</b>).<br>For a permanent fix run the helper inside
+            Ubuntu: <code>sh /data/.ubuntu-data-tools/setup-sharing.sh</code></div>
+          <pre id="out" class="hidden" style="margin-top:12px"></pre>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <div id="picker" class="hidden">
+    <div class="box">
+      <h3 id="pkTitle">Select folder</h3>
+      <select id="pkRoot"></select>
+      <div id="pkPath"></div>
+      <div id="pkList"></div>
+      <div id="pkNew" class="hidden"><input id="pkNewName" type="text" placeholder="new folder name"
+          autocapitalize="off" autocomplete="off"><button id="pkNewOk" type="button">Create</button></div>
+      <div class="btns">
+        <button id="pkMk" type="button" style="margin-right:auto">New folder</button>
+        <button id="pkNo" type="button">Cancel</button>
+        <button id="pkYes" type="button" class="primary" style="width:auto;padding:11px 18px">Select this
+          folder</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+  <div id="modal" class="hidden">
+    <div class="box">
+      <p id="mText"></p>
+      <div class="btns">
+        <button id="mNo">Cancel</button><button id="mYes" class="primary danger"
+          style="width:auto;padding:11px 18px">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const SCRIPT = '/data/adb/modules/mount_ubuntu_data/ubuntu-data.sh';
+      const $ = (id) => document.getElementById(id);
+      const hasBridge = typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function';
+      let busy = false, cur = {}, timer = null;
+
+      // ---- root shell bridge (KernelSU WebUI API) -------------------------------
+      function sh(cmd) {
+        return new Promise((resolve) => {
+          if (!hasBridge) return resolve({ code: -1, out: '', err: 'no root bridge' });
+          const cb = 'ud_cb_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+          window[cb] = (code, stdout, stderr) => { delete window[cb]; resolve({ code, out: stdout || '', err: stderr || '' }); };
+          try { window.ksu.exec(cmd, '{}', cb); }
+          catch (e) { delete window[cb]; resolve({ code: -1, out: '', err: String(e) }); }
+        });
+      }
+      const ud = (args) => sh(`sh ${SCRIPT} ${args}`);
+
+      // ---- helpers ---------------------------------------------------------------
+      function toast(msg) {
+        const t = $('toast'); t.textContent = msg; t.classList.add('show');
+        clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2600);
+      }
+      function confirmBox(text) {
+        return new Promise((resolve) => {
+          $('mText').textContent = text; $('modal').classList.remove('hidden');
+          const done = (v) => { $('modal').classList.add('hidden'); $('mYes').onclick = $('mNo').onclick = null; resolve(v); };
+          $('mYes').onclick = () => done(true); $('mNo').onclick = () => done(false);
+        });
+      }
+      function fmt(kb) {
+        kb = Number(kb) || 0;
+        if (kb >= 1048576) return (kb / 1048576).toFixed(1) + ' GB';
+        if (kb >= 1024) return (kb / 1024).toFixed(1) + ' MB';
+        return kb + ' KB';
+      }
+      function parse(text) {
+        const o = {};
+        text.split('\n').forEach((l) => { const i = l.indexOf('='); if (i > 0) o[l.slice(0, i)] = l.slice(i + 1); });
+        return o;
+      }
+      function showOut(text) { const p = $('out'); p.textContent = text.trim() || '(no output)'; p.classList.remove('hidden'); p.scrollTop = p.scrollHeight; }
+
+      // ---- render ----------------------------------------------------------------
+      const LABEL = { mounted: 'Mounted', unmounted: 'Not mounted', absent: 'Partition not found', waiting: 'Waiting for unlock', disabled: 'Mount disabled', conflict: 'Mount point in use', error: 'Mount failed' };
+      function render(s) {
+        cur = s;
+        const st = s.state || 'unknown';
+        $('dot').className = 'dot ' + st;
+        $('stateText').textContent = LABEL[st] || 'Unknown';
+        $('vDev').textContent = (s.device || '–') + (s.partname ? ' (' + s.partname + ')' : '');
+        $('vLayout').textContent = s.dev_cfg === 'auto' ? (s.layout || 'auto: no userdata partition found') : 'set manually in config.sh';
+        $('vFs').textContent = st === 'mounted' ? `${s.fstype || 'ext4'} · ${s.mode || ''}` : '–';
+        $('vSd').textContent = s.sdcard_path || '–';
+        $('vView').textContent = st !== 'mounted' ? '–' : ({ ok: 'Yes', missing: 'Not yet', 'n/a': 'Unknown' }[s.android_view] || '–');
+        $('vBinds').textContent = st === 'mounted' ? (s.binds || '0') : '–';
+
+        const m = st === 'mounted';
+        $('meterWrap').classList.toggle('hidden', !m);
+        if (m) {
+          $('meter').style.width = Math.min(100, Number(s.use_pct) || 0) + '%';
+          $('usedL').textContent = fmt(s.used_kb) + ' used';
+          $('freeL').textContent = fmt(s.avail_kb) + ' free of ' + fmt(s.size_kb);
+        }
+        const e = $('err');
+        let msg = (st === 'error' || st === 'conflict') ? s.last_error : '';
+        if (!msg && m && s.selabel === 'plain') msg = 'Mounted without an SELinux label, so Android apps may be denied access. Run Diagnostics.';
+        e.textContent = msg || ''; e.classList.toggle('hidden', !msg);
+
+        const b = $('main');
+        b.classList.toggle('danger', m);
+        b.textContent = m ? 'Unmount' : (st === 'absent' ? 'Partition not found' : (st === 'disabled' ? 'Partition mount disabled' : 'Mount'));
+        b.disabled = busy || st === 'absent' || st === 'waiting' || st === 'conflict' || st === 'disabled';
+        $('auto').checked = s.automount === '1';
+        for (const id of ['bFsck', 'bMedia', 'bDiag', 'bLog', 'bAccess', 'bRead', 'bWrite']) $(id).disabled = busy;
+        for (const id of ['bAccess', 'bRead', 'bWrite']) $(id).disabled = busy || !m;
+        $('bFsck').disabled = busy || m || st === 'absent' || st === 'disabled';
+      }
+
+      async function refresh() {
+        if (busy || !hasBridge) return;
+        const r = await ud('status');
+        if (r.out.includes('state=')) render(parse(r.out));
+        else { $('stateText').textContent = 'Cannot read status'; showOut(r.err || r.out || 'ubuntu-data.sh did not answer (is the module enabled?)'); }
+      }
+
+      async function run(label, args, opts = {}) {
+        if (busy) return;
+        busy = true; render(cur);
+        $('main').textContent = label + '…';
+        const r = await ud(args);
+        busy = false;
+        if (opts.show !== false) showOut(r.out + (r.err ? '\n' + r.err : ''));
+        await refresh();
+        return r;
+      }
+
+      // ---- actions ---------------------------------------------------------------
+      $('main').onclick = async () => {
+        if (cur.state === 'mounted') {
+          let r = await run('Unmounting', 'umount');
+          if (r && r.code === 5 && await confirmBox('The partition is still in use (Ubuntu running or a file manager open). Force a lazy unmount anyway? Open files may lose unsaved writes.')) {
+            r = await run('Unmounting', 'umount force');
+          }
+          toast(r && r.code === 0 ? 'Unmounted' : 'Still mounted');
+        } else {
+          const r = await run('Mounting', 'mount');
+          toast(r && r.code === 0 ? 'Mounted' : 'Mount failed, see details');
+        }
+      };
+      $('auto').onchange = async (ev) => {
+        const r = await ud('set AUTOMOUNT ' + (ev.target.checked ? 1 : 0));
+        toast(r.code === 0 ? (ev.target.checked ? 'Auto-mount on' : 'Auto-mount off') : 'Could not save');
+        refresh();
+      };
+      $('bFsck').onclick = async () => { if (await confirmBox('Run e2fsck on the unmounted partition? Make sure Ubuntu is not using it.')) run('Checking', 'fsck'); };
+      $('bAccess').onclick = () => run('Testing', 'access');
+      $('bRead').onclick = async () => { if (await confirmBox('Give group media_rw (Android\'s storage daemon) read access to every file? Owners stay the same; the group of every file becomes media_rw.')) run('Fixing', 'fixperms read'); };
+      $('bWrite').onclick = async () => { if (await confirmBox('Give group media_rw read AND write access to every file? Owners stay the same; the group of every file becomes media_rw.')) run('Fixing', 'fixperms rw'); };
+      $('bMedia').onclick = async () => { if (await confirmBox('Stop the media provider so /sdcard re-reads the mount? File managers may close.')) run('Restarting', 'restart-media'); };
+      $('bDiag').onclick = () => run('Collecting', 'diag');
+      $('bLog').onclick = () => run('Loading', 'log 80');
+
+      // ---- folder mounts ----------------------------------------------------------
+      let vfsOk = false;
+      const PATH_RE = /^[A-Za-z0-9_.@\/+-]+$/, ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
+      let editing = null;   // id of the folder mount being edited, or null when adding
+      function applyMethodState() {
+        const sel = $('fMode');
+        for (const o of sel.options) o.disabled = o.value !== 'bind' && !vfsOk;
+        if (!vfsOk && !editing) sel.value = 'bind';
+        // no Hybrid Mount: the dropdown is locked to "Bind mount" (an old VFS/Auto entry may still be switched to bind)
+        sel.disabled = !vfsOk && sel.value === 'bind';
+        $('fHint').textContent = vfsOk ? 'Hybrid Mount VFS provider detected.' : 'Hybrid Mount is not available (metamodule or kernel provider missing), so only Bind mount can be used.';
+      }
+      async function checkVfs() {
+        const r = await ud('bind vfs-check');
+        vfsOk = r.code === 0;
+        applyMethodState();
+      }
+      $('fMode').addEventListener('change', applyMethodState);
+      $('addbox').addEventListener('toggle', () => { if ($('addbox').open) checkVfs(); });
+      function entRow(e) {
+        const row = document.createElement('div'); row.className = 'ent';
+        const meta = document.createElement('div'); meta.className = 'meta';
+        const b = document.createElement('b'); b.textContent = e.id;
+        const pill = document.createElement('span'); pill.className = 'pill' + (e.state === 'mounted' ? ' on' : '');
+        pill.textContent = e.state === 'mounted' ? e.mode + ' · on' : e.mode;
+        b.appendChild(pill);
+        if (e.state === 'mounted') b.appendChild(stIcon(e));
+        const sm = document.createElement('small'); sm.textContent = e.src + '  →  ' + e.dst;
+        meta.append(b, sm);
+        const act = document.createElement('button'); act.textContent = e.state === 'mounted' ? 'Unmount' : 'Mount';
+        act.onclick = () => entryAct(e);
+        const edit = document.createElement('button'); edit.className = 'x'; edit.textContent = '✎'; edit.title = 'Edit';
+        edit.onclick = () => startEdit(e);
+        const del = document.createElement('button'); del.className = 'x'; del.textContent = '✕'; del.title = 'Delete';
+        del.onclick = async () => {
+          if (!(await confirmBox('Delete the folder mount "' + e.id + '"? It will be unmounted first. Files stay on the partition.'))) return;
+          const r = await ud('bind del ' + e.id); toast(r.code === 0 ? 'Deleted' : 'Could not delete'); if (r.code) showOut(r.out + r.err); loadEntries();
+        };
+        row.append(meta, act, edit, del);
+        return row;
+      }
+      async function loadEntries() {
+        if (!hasBridge) return;
+        const r = await ud('bind list');
+        const box = $('entries'); box.textContent = '';
+        const list = r.out.split('\n').filter((l) => l.startsWith('entry=')).map((l) => {
+          const [id, state, mode, auto, src, dst, owner, stop] = l.slice(6).split('|'); return { id, state, mode, auto, src, dst, owner, stop };
+        });
+        entCache = list;
+        if (!list.length) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = 'No folder mounts yet.'; box.appendChild(d); return; }
+        list.forEach((e) => box.appendChild(entRow(e)));
+        list.forEach((e) => { if (e.state === 'mounted') queueTest(e); });
+      }
+      // ---- read/write test per folder mount ----------------------------------------
+      let entCache = [];
+      const tests = {};            // id -> { sig, status, msg, detail } ; status ok|warn|fail|busy
+      const testQ = [];
+      let testRun = false;
+      const ICON = { ok: '✔', fail: '✖', warn: '❗', busy: '…' };
+      const TITLE = { ok: 'Read/write OK', fail: 'Read/write failed', warn: 'Works with a warning', busy: 'Testing…' };
+      const sigOf = (e) => [e.src, e.dst, e.mode, e.state].join('|');
+      function stIcon(e) {
+        const t = tests[e.id], ok = t && t.sig === sigOf(e);
+        const b = document.createElement('button'); b.type = 'button';
+        const s = ok ? t.status : 'busy';
+        b.className = 'st ' + s; b.textContent = ICON[s];
+        b.title = (ok ? t.msg + ' (tap for details / re-test)' : TITLE.busy);
+        b.setAttribute('aria-label', b.title);
+        b.onclick = () => showTest(e);
+        return b;
+      }
+      function queueTest(e, force) {
+        const t = tests[e.id];
+        if (!force && t && t.sig === sigOf(e)) return;
+        if (!force && testQ.some((q) => q.id === e.id)) return;
+        if (force) delete tests[e.id];
+        testQ.push(e); pump();
+      }
+      async function pump() {
+        if (testRun) return; testRun = true;
+        while (testQ.length) {
+          const e = testQ.shift();
+          const sig = sigOf(e);
+          const r = await ud('bind test ' + e.id);
+          const o = parse(r.out);
+          tests[e.id] = {
+            sig, status: ['ok', 'warn', 'fail'].includes(o.status) ? o.status : 'warn',
+            msg: o.msg || (r.err || 'Test gave no result').trim().split('\n')[0],
+            detail: r.out.split('\n').filter((l) => l.startsWith('detail=')).map((l) => l.slice(7)).join('\n')
+          };
+        }
+        testRun = false; loadEntries();
+      }
+      async function showTest(e) {
+        toast('Testing ' + e.id + '…');
+        delete tests[e.id]; loadEntries();
+        const r = await ud('bind test ' + e.id);
+        const o = parse(r.out);
+        const t = tests[e.id] = {
+          sig: sigOf(e), status: ['ok', 'warn', 'fail'].includes(o.status) ? o.status : 'warn',
+          msg: o.msg || (r.err || 'Test gave no result').trim().split('\n')[0],
+          detail: r.out.split('\n').filter((l) => l.startsWith('detail=')).map((l) => l.slice(7)).join('\n')
+        };
+        showOut(ICON[t.status] + ' ' + e.id + ': ' + t.msg + '\n\n' + t.detail);
+        loadEntries();
+        if (t.status === 'fail' && /permission/i.test(t.msg) &&
+          await confirmBox('Make folder A group-writable for Android\'s media daemon (group media_rw, setgid) and test again?')) {
+          const f = await ud('bind fixwrite ' + e.id);
+          toast(f.code === 0 ? 'Permissions fixed' : 'Fix failed'); if (f.code) showOut(f.out + f.err);
+          queueTest(e, true);
+        }
+      }
+
+      // ---- edit ------------------------------------------------------------------
+      function startEdit(e) {
+        editing = e.id;
+        $('fId').value = e.id; $('fId').disabled = true;
+        setPicked('src', e.src); setPicked('dst', e.dst);
+        $('fMode').value = ['bind', 'vfs', 'auto'].includes(e.mode) ? e.mode : 'bind';
+        $('fOwner').checked = e.owner === 'auto';
+        $('fStop').checked = e.stop === '1';
+        $('fAuto').checked = e.auto !== '0';
+        $('fAdd').textContent = 'Save changes';
+        $('addSum').textContent = 'Edit folder mount: ' + e.id;
+        $('fCancel').classList.remove('hidden');
+        $('addbox').open = true; applyMethodState();
+        $('addbox').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (e.state === 'mounted') toast('It will be unmounted and mounted again when you save');
+      }
+      function endEdit() {
+        editing = null;
+        $('fId').disabled = false; $('fId').value = '';
+        setPicked('src', ''); setPicked('dst', '');
+        $('fMode').value = 'bind'; $('fOwner').checked = false; $('fStop').checked = false; $('fAuto').checked = true;
+        $('fAdd').textContent = 'Add'; $('addSum').textContent = 'Add folder mount';
+        $('fCancel').classList.add('hidden'); applyMethodState();
+      }
+      $('fCancel').onclick = () => { endEdit(); $('addbox').open = false; };
+
+      async function entryAct(e) {
+        if (busy) return; busy = true;
+        let r;
+        if (e.state === 'mounted') {
+          r = await ud('bind umount ' + e.id);
+          if (r.code === 5 && await confirmBox('"' + e.id + '" is still in use. Force a lazy unmount?')) r = await ud('bind umount ' + e.id + ' force');
+        } else r = await ud('bind mount ' + e.id);
+        busy = false;
+        toast(r.code === 0 ? 'Done' : 'Failed, see details'); if (r.code !== 0) showOut(r.out + r.err);
+        refresh(); loadEntries();
+      }
+      // ---- folder picker -----------------------------------------------------------
+      const SD_ROOT = '/data/media/0';
+      const NAME_RE = /^[A-Za-z0-9_.+-]+$/;
+      const picked = { src: '', dst: '' };   // config-form values: A = '@', '@/sub' or absolute; B = relative to internal storage or absolute
+      const pk = { kind: '', root: '', path: '', resolve: null };
+      const mp = () => cur.mountpoint || (SD_ROOT + '/ubuntu');
+      const norm = (p) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
+
+      function toConf(kind, abs) {
+        abs = norm(abs);
+        if (kind === 'src') {
+          if (abs === mp()) return '@';
+          if (abs.startsWith(mp() + '/')) return '@' + abs.slice(mp().length);
+          return abs;
+        }
+        if (abs.startsWith(SD_ROOT + '/')) return abs.slice(SD_ROOT.length + 1);
+        return abs;
+      }
+      function toLabel(kind, v) {
+        if (v === '@') return 'Ubuntu partition (root)';
+        if (v.startsWith('@/')) return 'Ubuntu partition: ' + v.slice(1);
+        if (kind === 'dst' && !v.startsWith('/')) return 'Internal storage: /' + v;
+        if (v.startsWith(SD_ROOT + '/')) return 'Internal storage: ' + v.slice(SD_ROOT.length);
+        return v;
+      }
+      function setPicked(kind, v) {
+        picked[kind] = v;
+        const el = $(kind === 'src' ? 'fSrcV' : 'fDstV');
+        el.textContent = v ? toLabel(kind, v) : 'Not selected';
+        el.classList.toggle('set', !!v);
+        if (kind === 'src' && v && !$('fId').value.trim()) {
+          const base = (v === '@' ? 'ubuntu' : v.split('/').filter(Boolean).pop() || 'folder').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 32);
+          $('fId').value = base;
+        }
+      }
+      function pkRender(list, err) {
+        $('pkPath').textContent = pk.path.startsWith(SD_ROOT) ? pk.path.replace(SD_ROOT, '/sdcard') : pk.path;
+        const box = $('pkList'); box.textContent = '';
+        const add = (icon, text, fn, off, title) => {
+          const b = document.createElement('button'); b.type = 'button'; b.className = 'pk';
+          const i = document.createElement('span'); i.className = 'ic'; i.textContent = icon;
+          const t = document.createElement('span'); t.textContent = text;
+          b.append(i, t); if (off) { b.disabled = true; if (title) b.title = title; } else b.onclick = fn;
+          box.appendChild(b);
+        };
+        if (pk.path !== pk.root) add('⬆', '..  (up)', () => pkGo(pk.path.replace(/\/[^/]+$/, '') || '/'));
+        if (err) { const d = document.createElement('div'); d.className = 'empty'; d.style.padding = '12px'; d.textContent = err; box.appendChild(d); return; }
+        list.forEach((n) => {
+          const ok = NAME_RE.test(n) && !n.includes('..');
+          add('📁', n, () => pkGo(norm(pk.path) + (pk.path === '/' ? '' : '/') + n).then(() => { }), !ok, 'Name has characters that are not supported');
+        });
+        if (!list.length) { const d = document.createElement('div'); d.className = 'empty'; d.style.padding = '12px'; d.textContent = 'No sub-folders here.'; box.appendChild(d); }
+      }
+      async function pkGo(path) {
+        pk.path = norm(path);
+        const r = await ud('browse ' + pk.path);
+        const lines = r.out.split('\n');
+        const e = lines.find((l) => l.startsWith('err='));
+        pkRender(lines.filter((l) => l.startsWith('dir=')).map((l) => l.slice(4)), e ? e.slice(4) : '');
+      }
+      function pkRoots(kind) {
+        const roots = [];
+        if (kind === 'src') roots.push({ label: 'Ubuntu partition', path: mp(), off: cur.state !== 'mounted' });
+        roots.push({ label: 'Internal storage (/sdcard)', path: SD_ROOT }, { label: 'Device root (/)', path: '/' });
+        return roots;
+      }
+      function pickFolder(kind) {
+        pk.kind = kind;
+        const roots = pkRoots(kind), sel = $('pkRoot'); sel.textContent = '';
+        roots.forEach((r, i) => { const o = document.createElement('option'); o.value = r.path; o.textContent = r.label + (r.off ? ' (mount it first)' : ''); o.disabled = !!r.off; sel.appendChild(o); });
+        const first = roots.find((r) => !r.off);
+        sel.value = first.path; pk.root = first.path;
+        $('pkTitle').textContent = kind === 'src' ? 'Select folder A (source)' : 'Select folder B (destination)';
+        $('pkNew').classList.add('hidden'); $('pkNewName').value = '';
+        $('picker').classList.remove('hidden');
+        pkGo(first.path);
+        return new Promise((resolve) => { pk.resolve = resolve; });
+      }
+      function pkClose(v) { $('picker').classList.add('hidden'); if (pk.resolve) { const f = pk.resolve; pk.resolve = null; f(v); } }
+      $('pkRoot').onchange = (ev) => { pk.root = ev.target.value; pkGo(pk.root); };
+      $('pkNo').onclick = () => pkClose(null);
+      $('pkYes').onclick = () => pkClose(pk.path);
+      $('pkMk').onclick = () => { $('pkNew').classList.toggle('hidden'); $('pkNewName').focus(); };
+      $('pkNewOk').onclick = async () => {
+        const n = $('pkNewName').value.trim();
+        if (!NAME_RE.test(n) || n.includes('..')) return toast('Folder name: letters, digits, . _ + -');
+        const r = await ud('mkdir ' + norm(pk.path) + (pk.path === '/' ? '' : '/') + n);
+        if (r.code !== 0) return toast((r.out || r.err || 'Could not create folder').trim().split('\n')[0]);
+        $('pkNewName').value = ''; $('pkNew').classList.add('hidden'); toast('Folder created'); pkGo(pk.path);
+      };
+      for (const [btn, kind] of [['fSrcB', 'src'], ['fDstB', 'dst']]) {
+        $(btn).onclick = async () => {
+          const abs = await pickFolder(kind);
+          if (!abs) return;
+          if (kind === 'dst' && (abs === SD_ROOT || abs === '/' || abs === mp())) return toast('Pick a sub-folder, not this root');
+          setPicked(kind, toConf(kind, abs));
+        };
+      }
+
+      $('fAdd').onclick = async () => {
+        const id = $('fId').value.trim();
+        const src = picked.src, dst = picked.dst;
+        if (!src) return toast('Select folder A');
+        if (!dst) return toast('Select folder B');
+        if (!ID_RE.test(id)) return toast('Name: letters, digits, - and _');
+        if (!PATH_RE.test(src) || src.includes('..')) return toast('Folder A has invalid characters');
+        if (!PATH_RE.test(dst) || dst.includes('..')) return toast('Folder B has invalid characters');
+        const opts = ['mode=' + $('fMode').value, 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
+        const wasEdit = !!editing;
+        const r = await ud(['bind', wasEdit ? 'edit' : 'add', id, src, dst, ...opts].join(' '));
+        if (r.code !== 0) { showOut(r.out + r.err); return toast(wasEdit ? 'Not saved' : 'Not added'); }
+        toast(wasEdit ? 'Saved' : 'Added'); $('addbox').open = false; endEdit();
+        refresh(); loadEntries();
+      };
+
+      $('support').addEventListener('click', async (ev) => {
+        if (!hasBridge) return;            // plain browser: let the link open normally
+        ev.preventDefault();
+        const r = await sh('am start --user 0 -a android.intent.action.VIEW -d https://t.me/kokernel >/dev/null 2>&1');
+        if (r.code !== 0) window.open('https://t.me/kokernel', '_blank');
+      });
+
+      // ---- boot ------------------------------------------------------------------
+      if (!hasBridge) { $('nobridge').classList.remove('hidden'); $('stateText').textContent = 'No root bridge'; $('main').textContent = 'Unavailable'; }
+      else {
+        refresh(); loadEntries(); checkVfs();
+        timer = setInterval(() => { if (!document.hidden) { refresh(); loadEntries(); } }, 4000);
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+      }
+    })();
+  </script>
+</body>
+
+</html>

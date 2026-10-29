@@ -1,0 +1,7 @@
+id=mount_ubuntu_data
+name=Mount Ubuntu Data
+version=v2.6
+versionCode=260
+author=zen
+support=https://t.me/kokernel
+description=Mounts the Ubuntu ext4 data partition (auto-detected: Android userdata + 3) at /sdcard/ubuntu so Android and Ubuntu share files. Live status appears here once the module is active.
