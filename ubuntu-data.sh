@@ -10,11 +10,14 @@
 #   umount [force]    unmount (force = lazy detach if busy)
 #   toggle            mount if unmounted, umount if mounted
 #   set KEY 0|1       change AUTOMOUNT / FIX_ROOT_PERMS / DISABLE_DATA_MOUNT in config.sh
+#   partition get|test <name>|set <name> [force]
+#                     partition = /dev/block/by-name/<name> (default "data"); test checks it exists
+#                     and is ext4; set tests, saves, unmounts the old one and mounts the new one
 #   browse <dir>      list sub-folders of an absolute path (WebUI folder picker)
 #   mkdir <dir>       create a folder inside the partition or internal storage (folder picker)
 #   bind list|add|del|mount|umount|vfs-check|vfs-test   folder A -> folder B mounts (binds.conf)
 #   packages [filter] list installed apps (pkg= uid=) for the VFS picker
-#   layout            show the auto-detected partition layout
+#   layout            show which block device the partition name resolves to
 #   access            test what the Android media daemon (gid media_rw) can read/write
 #   fixperms read|rw  group -> media_rw (1023) + g+rX (read) or g+rwX (rw), recursive, symlink-safe
 #   fsck              e2fsck -p on the (unmounted) partition
@@ -40,14 +43,14 @@ case "$0" in
 esac
 MODDIR=$(cd "$_d" 2>/dev/null && pwd)
 
-DATA_DIR=/data/adb/$MODID
+DATA_DIR=${UD_DATA:-/data/adb/$MODID}
 CONF=$DATA_DIR/config.sh
 LOG=$DATA_DIR/mount.log
 BINDS=$DATA_DIR/binds
 ERRF=$DATA_DIR/last_error
 LOCKDIR=$DATA_DIR/.lock
 PIDFILE=$DATA_DIR/daemon.pid
-SD_BASE=/data/media/0
+SD_BASE=${UD_SD:-/data/media/0}
 SYSBLK=${UD_SYSBLK:-/sys/class/block}
 DEVBLK=${UD_DEVBLK:-/dev/block}
 
@@ -90,35 +93,43 @@ ensure_init_ns() {
 # ------------------------------------------------------------------------------
 # Config
 # ------------------------------------------------------------------------------
-# DEV=auto: the partition DEV_OFFSET after Android's userdata (userdata, esp, linux, Ubuntu data = +3)
-resolve_auto_dev() {
-  AUTO_UD=""; LAYOUT=""
-  for _bn in "$DEVBLK/by-name/userdata" "$DEVBLK/bootdevice/by-name/userdata"; do
-    _ud=$(readlink -f "$_bn" 2>/dev/null)
-    if [ -n "$_ud" ] && [ -e "$_ud" ]; then AUTO_UD=${_ud##*/}; break; fi
-  done
-  if [ -z "$AUTO_UD" ]; then
-    for _u in "$SYSBLK"/*/uevent; do
-      if grep -qx 'PARTNAME=userdata' "$_u" 2>/dev/null; then
-        _bp=${_u%/uevent}; AUTO_UD=${_bp##*/}; break
-      fi
+# DEV=auto: /dev/block/by-name/<PART_NAME> (default name: "data")
+valid_partname() {
+  case "$1" in
+    ""|.|..|-*|*[!A-Za-z0-9_.-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 36 ]
+}
+
+# Needs DEV_CFG (auto or an explicit /dev path) and PART_NAME. Sets DEV DEV_REAL DEV_BASE DEV_MM DEV_PARTNAME LAYOUT.
+resolve_dev() {
+  LAYOUT=""
+  if [ "$DEV_CFG" = "auto" ]; then
+    DEV=""
+    for _bn in "$DEVBLK/by-name/$PART_NAME" "$DEVBLK/bootdevice/by-name/$PART_NAME"; do
+      if [ -e "$_bn" ]; then DEV=$_bn; break; fi
     done
+    [ -n "$DEV" ] || DEV=$DEVBLK/by-name/$PART_NAME
+  else
+    DEV=$DEV_CFG
   fi
-  DEV=""
-  [ -n "$AUTO_UD" ] || return 1
-  _pfx=${AUTO_UD%%[0-9]*}
-  _num=${AUTO_UD#"$_pfx"}
-  case "$_num" in ""|*[!0-9]*) return 1 ;; esac
-  case "$DEV_OFFSET" in ""|*[!0-9]*) DEV_OFFSET=3 ;; esac
-  DEV=$DEVBLK/$_pfx$((_num + DEV_OFFSET))
-  if [ "$DEV_OFFSET" = 3 ]; then _skip=" (esp, linux, data)"; else _skip=""; fi
-  LAYOUT="userdata=$AUTO_UD + $DEV_OFFSET$_skip -> $DEV"
-  return 0
+  DEV_REAL=$(readlink -f "$DEV" 2>/dev/null)
+  [ -z "$DEV_REAL" ] && DEV_REAL=$DEV
+  DEV_BASE=${DEV_REAL##*/}
+  DEV_MM=$(cat "$SYSBLK/$DEV_BASE/dev" 2>/dev/null)
+  DEV_PARTNAME=$(sed -n 's/^PARTNAME=//p' "$SYSBLK/$DEV_BASE/uevent" 2>/dev/null)
+  [ "$DEV_CFG" = "auto" ] && LAYOUT="by-name/$PART_NAME -> $DEV_REAL"
+}
+
+use_partname() { # <name>: resolve another partition name without touching config.sh
+  PART_NAME=$1
+  DEV_CFG=auto
+  resolve_dev
 }
 
 load_conf() {
   DEV=auto
-  DEV_OFFSET=3
+  PART_NAME=data
   MOUNT_NAME=ubuntu
   AUTOMOUNT=0
   FIX_ROOT_PERMS=1
@@ -132,31 +143,43 @@ load_conf() {
   case "$MOUNT_NAME" in
     ""|.|..|*/*|*" "*) MOUNT_NAME=ubuntu ;;
   esac
+  valid_partname "$PART_NAME" || PART_NAME=data
+  [ -n "$DEV" ] || DEV=auto
   [ "$DISABLE_DATA_MOUNT" = "1" ] || DISABLE_DATA_MOUNT=0
   TARGET=$SD_BASE/$MOUNT_NAME
   SDPATH=/sdcard/$MOUNT_NAME
 
   DEV_CFG=$DEV
-  LAYOUT=""; AUTO_UD=""
-  [ "$DEV" = "auto" ] && resolve_auto_dev
+  resolve_dev
+  # log only when something changed (status/daemon call this every few seconds)
+  _lc="DEV_CFG=$DEV_CFG DEV_REAL=$DEV_REAL PARTNAME=$DEV_PARTNAME layout=$LAYOUT"
+  if [ "$_lc" != "$(cat "$DATA_DIR/.lastconf" 2>/dev/null)" ]; then
+    _log "load_conf: $_lc"
+    echo "$_lc" > "$DATA_DIR/.lastconf" 2>/dev/null
+  fi
+}
 
-  DEV_REAL=$(readlink -f "$DEV" 2>/dev/null)
-  [ -z "$DEV_REAL" ] && DEV_REAL=$DEV
-  DEV_BASE=${DEV_REAL##*/}
-  DEV_MM=$(cat "$SYSBLK/$DEV_BASE/dev" 2>/dev/null)
-  DEV_PARTNAME=$(sed -n 's/^PARTNAME=//p' "$SYSBLK/$DEV_BASE/uevent" 2>/dev/null)
-  _log "load_conf: DEV_CFG=$DEV_CFG DEV_REAL=$DEV_REAL PARTNAME=$DEV_PARTNAME layout=$LAYOUT"
+conf_put() { # <KEY> <VALUE>: set one key in config.sh
+  cmd_init_config
+  grep -v "^$1=" "$CONF" > "$CONF.tmp" 2>/dev/null
+  echo "$1=$2" >> "$CONF.tmp"
+  cat "$CONF.tmp" > "$CONF"
+  rm -f "$CONF.tmp"
 }
 
 cmd_init_config() {
-  [ -f "$CONF" ] && return 0
+  if [ -f "$CONF" ]; then
+    # upgrade from <= v2.6 (userdata + offset): add the partition name key
+    grep -q '^PART_NAME=' "$CONF" 2>/dev/null || printf '\nPART_NAME=data\n' >> "$CONF"
+    return 0
+  fi
   cat > "$CONF" <<'EOF'
 # Mount Ubuntu Data - configuration (sourced as shell). Author: zen
-# Block device of the shared ext4 partition. "auto" = the partition DEV_OFFSET after Android's
-# userdata. Layout: userdata, esp, linux, Ubuntu /data  ->  offset 3 (sda15 -> sda18).
+# Block device of the shared ext4 partition. "auto" = /dev/block/by-name/<PART_NAME>.
 # Or set it explicitly, e.g.  DEV=/dev/block/sda18
 DEV=auto
-DEV_OFFSET=3
+# Partition name under /dev/block/by-name/ (changeable in the WebUI)
+PART_NAME=data
 # Folder name in Android internal storage: /sdcard/<MOUNT_NAME>
 MOUNT_NAME=ubuntu
 # 1 = mount automatically after boot (once the user has unlocked the device). Default 0 = off.
@@ -207,6 +230,11 @@ lock() {
       continue
     fi
     _i=$((_i + 1))
+    # a lock directory that never got a pid file (holder died in between) is stale after a few seconds
+    if [ -z "$_p" ] && [ "$_i" -ge 5 ]; then
+      rm -rf "$LOCKDIR"
+      continue
+    fi
     if [ "$_i" -ge 60 ]; then
       echo "Another mount/umount operation is still running."
       return 1
@@ -272,10 +300,8 @@ preflight() {
   PF_MSG=""
   PF_WARN=""
   if [ ! -b "$DEV_REAL" ]; then
-    if [ "$DEV_CFG" = "auto" ] && [ -z "$DEV" ]; then
-      PF_MSG="auto-detect: no 'userdata' partition found, cannot derive the Ubuntu partition"
-    elif [ "$DEV_CFG" = "auto" ]; then
-      PF_MSG="$DEV not found (auto-detect: userdata $AUTO_UD + $DEV_OFFSET)"
+    if [ "$DEV_CFG" = "auto" ]; then
+      PF_MSG="partition '$PART_NAME' not found ($DEVBLK/by-name/$PART_NAME does not exist)"
     else
       PF_MSG="$DEV not found (partition does not exist on this device)"
     fi
@@ -395,7 +421,7 @@ build_summary() {
     unmounted) S_SUMMARY="🔴 Unmounted · $_dn is ready (press Action or use the WebUI to mount)" ;;
     waiting)   S_SUMMARY="⏳ Waiting for the first unlock to mount $_dn" ;;
     absent)
-      if [ "$DEV_CFG" = "auto" ]; then S_SUMMARY="⚪ Ubuntu partition not found (${LAYOUT:-no userdata partition}) · nothing to mount"
+      if [ "$DEV_CFG" = "auto" ]; then S_SUMMARY="⚪ Partition '$PART_NAME' not found · nothing to mount"
       else S_SUMMARY="⚪ $DEV not found · nothing to mount"; fi ;;
     conflict)  S_SUMMARY="🟠 $S_ERR" ;;
     error)     S_SUMMARY="🟠 Mount failed · $S_ERR" ;;
@@ -410,6 +436,7 @@ cmd_status() {
   echo "device=$DEV_REAL"
   echo "partname=$DEV_PARTNAME"
   echo "dev_cfg=$DEV_CFG"
+  echo "part_name=$PART_NAME"
   echo "layout=$LAYOUT"
   echo "selabel=$S_SEL"
   echo "fstype=$S_FS"
@@ -428,7 +455,7 @@ cmd_status() {
   echo "fix_root_perms=$FIX_ROOT_PERMS"
   echo "disable_data_mount=$DISABLE_DATA_MOUNT"
   echo "last_error=$S_ERR"
-  if vfs_ready 2>/dev/null; then echo "vfs_available=1"; else echo "vfs_available=0"; fi
+  if vfs_ready_cached; then echo "vfs_available=1"; else echo "vfs_available=0"; fi
   echo "summary=$S_SUMMARY"
 }
 
@@ -445,84 +472,6 @@ cmd_info() {
   return 0
 }
 
-# mount_bind_rw <src> <dst> [ro]
-# Bind <src> on <dst> and make it writable.
-# Android toybox `mount --bind` often sets MS_RDONLY, so the mount shows up but
-# every write fails with "Read-only file system". The ext4 mount passes an
-# explicit `rw` option, which is why sda -> /sdcard/ubuntu is writable and a
-# folder bind was not. Pass "ro" only for /mnt/runtime/read (apps without write
-# permission). Prints the error on stdout and returns non-zero on failure.
-mount_bind_rw() {
-  _br_src=$1
-  _br_dst=$2
-  _br_ro=0
-  [ "$3" = "ro" ] && _br_ro=1
-  [ -d "$_br_src" ] || { echo "source $_br_src is not a directory"; return 1; }
-  mkdir -p "$_br_dst" 2>/dev/null || { echo "cannot create $_br_dst"; return 1; }
-
-  _br_same=0
-  if mnt_find "$_br_dst"; then
-    _br_a=$(stat -c '%d:%i' "$_br_src" 2>/dev/null)
-    _br_b=$(stat -c '%d:%i' "$_br_dst" 2>/dev/null)
-    if [ -n "$_br_a" ] && [ "$_br_a" = "$_br_b" ]; then
-      _br_same=1
-    else
-      umount "$_br_dst" 2>/dev/null || umount -l "$_br_dst" 2>/dev/null || true
-      if mnt_find "$_br_dst"; then
-        echo "$_br_dst is busy with another mount"
-        return 1
-      fi
-    fi
-  fi
-
-  if [ "$_br_same" -eq 0 ]; then
-    _br_e=""
-    if [ "$_br_ro" -eq 1 ]; then
-      _br_e=$(mount -o bind "$_br_src" "$_br_dst" 2>&1) || _br_e=$(mount --bind "$_br_src" "$_br_dst" 2>&1) || {
-        echo "$_br_e"
-        return 1
-      }
-    else
-      _br_e=$(mount -o bind,rw "$_br_src" "$_br_dst" 2>&1) \
-        || _br_e=$(mount -o rw,bind "$_br_src" "$_br_dst" 2>&1) \
-        || _br_e=$(mount --bind "$_br_src" "$_br_dst" 2>&1) || {
-        echo "$_br_e"
-        return 1
-      }
-    fi
-  fi
-
-  if [ "$_br_ro" -eq 1 ]; then
-    mount -o remount,bind,ro "$_br_dst" >/dev/null 2>&1 || mount -o ro,remount,bind "$_br_dst" >/dev/null 2>&1 || true
-    mnt_find "$_br_dst" || { echo "mount disappeared"; return 1; }
-    return 0
-  fi
-
-  _br_try=0
-  while [ "$_br_try" -lt 2 ]; do
-    mnt_find "$_br_dst" || { echo "mount disappeared"; return 1; }
-    case ",$MI_OPTS," in
-      *,ro,*)
-        mount -o remount,bind,rw "$_br_dst" >/dev/null 2>&1 \
-          || mount -o rw,remount,bind "$_br_dst" >/dev/null 2>&1 \
-          || mount -o remount,rw "$_br_dst" >/dev/null 2>&1 \
-          || true
-        if command -v busybox >/dev/null 2>&1; then
-          busybox mount -o remount,rw,bind "$_br_dst" >/dev/null 2>&1 || true
-        fi
-        ;;
-      *) break ;;
-    esac
-    _br_try=$((_br_try + 1))
-  done
-
-  mnt_find "$_br_dst" || { echo "mount disappeared"; return 1; }
-  case ",$MI_OPTS," in
-    *,ro,*) echo "mounted read-only and remount rw failed (options: $MI_OPTS)"; return 1 ;;
-  esac
-  return 0
-}
-
 # ------------------------------------------------------------------------------
 # Mount
 # ------------------------------------------------------------------------------
@@ -536,9 +485,14 @@ mount_extra_binds() {
       _log "bad EXTRA_BINDS entry: $_pair"
       continue
     fi
-    if _e=$(mount_bind_rw "$_src" "$_dst"); then
+    mkdir -p "$_dst" 2>/dev/null
+    if mnt_find "$_dst" && [ "$MI_MM" = "$DEV_MM" ]; then
+      _log "bind already present: $_dst"
+      continue
+    fi
+    if _e=$(mount --bind "$_src" "$_dst" 2>&1); then
       echo "$_dst" >> "$BINDS"
-      say "[+] bind $_src -> $_dst (rw)"
+      say "[+] bind $_src -> $_dst"
     else
       say "[!] bind $_src -> $_dst failed: $_e"
     fi
@@ -546,7 +500,7 @@ mount_extra_binds() {
 }
 
 # Mirror the mount into the lower-filesystem views that Android keeps around, in case
-# the mount did not propagate into them.
+# the mount did not propagate into them. Plain bind mounts only.
 mount_runtime_views() {
   for _base in /storage/emulated/0 /mnt/user/0/emulated/0 \
                /mnt/pass_through/0/emulated/0 /mnt/androidwritable/0/emulated/0 \
@@ -555,26 +509,11 @@ mount_runtime_views() {
     _v=$_base/$MOUNT_NAME
     _sv=$(stat -c %d "$_v" 2>/dev/null)
     _st=$(stat -c %d "$TARGET" 2>/dev/null)
-    if [ -n "$_sv" ] && [ "$_sv" = "$_st" ]; then
-      # Same filesystem already. A propagated bind can still be read-only; force rw
-      # except on the runtime/read view, which Android keeps read-only on purpose.
-      case "$_v" in
-        /mnt/runtime/read/*) continue ;;
-      esac
-      if mnt_find "$_v"; then
-        case ",$MI_OPTS," in
-          *,ro,*) mount_bind_rw "$TARGET" "$_v" >/dev/null && _log "remounted rw view $_v" ;;
-        esac
-      fi
-      continue
-    fi
-    _ro=""
-    case "$_v" in
-      /mnt/runtime/read/*) _ro=ro ;;
-    esac
-    if mount_bind_rw "$TARGET" "$_v" "$_ro" >/dev/null; then
+    [ -n "$_sv" ] && [ "$_sv" = "$_st" ] && continue
+    mkdir -p "$_v" 2>/dev/null
+    if mount --bind "$TARGET" "$_v" 2>/dev/null; then
       echo "$_v" >> "$BINDS"
-      _log "bound into view $_v ($_ro)"
+      _log "bound into view $_v"
     fi
   done
 }
@@ -672,7 +611,7 @@ do_mount() {
         find "$TARGET" -xdev -type d -exec chmod 2775 {} + 2>/dev/null || true
         touch "$TARGET/.android_perms_initialized" 2>/dev/null || true
         _log "[+] Android media_rw permissions initialized."
-      ) &
+      ) >/dev/null 2>&1 </dev/null &
     fi
   fi
 
@@ -849,6 +788,7 @@ entry_dsts() {
 }
 
 entry_statefile() { echo "$DATA_DIR/bind.$1"; }
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
 
 entry_state() { # <id> -> mounted|unmounted
   _sf=$(entry_statefile "$1")
@@ -856,7 +796,8 @@ entry_state() { # <id> -> mounted|unmounted
   read -r _k _v _rest < "$_sf"
   case "$_k" in
     M) if mnt_find "$_v"; then echo mounted; else echo unmounted; fi ;;
-    V) echo mounted ;;
+    V) # VFS rules are runtime-only: a state file from an earlier boot is stale
+       if [ "$(cat "$_sf.boot" 2>/dev/null)" = "$(boot_id)" ]; then echo mounted; else echo unmounted; fi ;;
     *) echo unmounted ;;
   esac
 }
@@ -880,53 +821,8 @@ entry_apply_owner() {
       _own="$_u:$_g" ;;
     *) _own=$E_OWNER ;;
   esac
-  chown "$_own" "$E_SRCP" 2>/dev/null \
-    && say "[+] $E_ID: $E_SRCP owner set to $_own"
-}
-
-# Make folder A writable from Android. The ext4 mount being rw is not enough:
-# Ubuntu files are usually owner-only, and Android writes /sdcard as group
-# media_rw (1023). App-private folders (Android/data, Android/obb) are written
-# as the app uid, which is not in that group, so those also get other-write.
-entry_open_rw() {
-  [ -d "$E_SRCP" ] || return 0
-  case "$E_SRCP" in
-    /|/data|/data/media|/data/media/0|/sdcard|/storage|/storage/emulated|/storage/emulated/0)
-      say "[~] $E_ID: not changing permissions on $E_SRCP"
-      return 0 ;;
-  esac
-  find "$E_SRCP" -xdev ! -type l -exec chgrp 1023 {} + 2>/dev/null
-  find "$E_SRCP" -xdev ! -type l -exec chmod g+rwX {} + 2>/dev/null
-  find "$E_SRCP" -xdev -type d -exec chmod g+s {} + 2>/dev/null
-
-  _appu=""
-  case "$E_OWNER" in
-    auto) [ -n "$E_PKG" ] && _appu=$(pkg_uid "$E_PKG") ;;
-  esac
-  # VFS is opened by the app itself, not by the media daemon, so that app must be able to write.
-  if [ "$E_MODE" = "vfs" ] && [ -n "$E_PKG" ]; then _appu=$(pkg_uid "$E_PKG"); fi
-  if [ -n "$_appu" ]; then
-    if [ "$E_KIND" = "obb" ]; then _appg=1079; else _appg=1078; fi
-    find "$E_SRCP" -xdev ! -type l -exec chmod o+rwX {} + 2>/dev/null
-    chown "$_appu:$_appg" "$E_SRCP" 2>/dev/null
-    chmod 2777 "$E_SRCP" 2>/dev/null
-    if command -v setfacl >/dev/null 2>&1; then
-      find "$E_SRCP" -xdev ! -type l -exec setfacl -m "u:${_appu}:rwX,g:1023:rwX,m::rwx" {} + 2>/dev/null
-      find "$E_SRCP" -xdev -type d -exec setfacl -m "d:u:${_appu}:rwX,d:g:1023:rwX,d:o:rwx,d:m::rwx" {} + 2>/dev/null
-    fi
-    say "[+] $E_ID: $E_SRCP writable by Android and by $E_PKG (uid $_appu)"
-  else
-    if command -v setfacl >/dev/null 2>&1; then
-      find "$E_SRCP" -xdev ! -type l -exec setfacl -m "g:1023:rwX,m::rwx" {} + 2>/dev/null
-      find "$E_SRCP" -xdev -type d -exec setfacl -m "d:g:1023:rwX,d:m::rwx" {} + 2>/dev/null
-    fi
-    chmod 2775 "$E_SRCP" 2>/dev/null
-    case "$E_OWNER" in
-      [0-9]*:[0-9]*) chown "$E_OWNER" "$E_SRCP" 2>/dev/null ;;
-    esac
-    say "[+] $E_ID: $E_SRCP writable by Android (group media_rw, setgid)"
-  fi
-  return 0
+  chown "$_own" "$E_SRCP" 2>/dev/null && chmod 2770 "$E_SRCP" 2>/dev/null \
+    && say "[+] $E_ID: $E_SRCP is now owned by $_own (mode 2770)"
 }
 
 entry_mount() { # <id> <ctx: manual|auto>
@@ -961,7 +857,6 @@ entry_mount() { # <id> <ctx: manual|auto>
   done
 
   entry_apply_owner
-  entry_open_rw
 
   _sf=$(entry_statefile "$E_ID")
   : > "$_sf"
@@ -976,18 +871,14 @@ entry_mount() { # <id> <ctx: manual|auto>
     fi
   fi
   if [ $_done -eq 0 ]; then
+    _first=1
     for _d in $_dsts; do
-      _ro=""
-      case "$_d" in
-        /mnt/runtime/read/*) _ro=ro ;;
-      esac
-      if _e=$(mount_bind_rw "$E_SRCP" "$_d" "$_ro"); then
+      if mnt_find "$_d" && [ $_first -eq 0 ]; then _first=0; continue; fi
+      _first=0
+      mkdir -p "$_d" 2>/dev/null
+      if _e=$(mount --bind "$E_SRCP" "$_d" 2>&1); then
         echo "M $_d" >> "$_sf"
-        if [ "$_ro" = "ro" ]; then
-          say "[+] $E_ID: $E_SRCP -> $_d (read-only view)"
-        else
-          say "[+] $E_ID: $E_SRCP -> $_d (rw)"
-        fi
+        say "[+] $E_ID: $E_SRCP -> $_d"
       else
         say "[!] $E_ID: bind to $_d failed: $_e"
       fi
@@ -1002,6 +893,19 @@ entry_mount() { # <id> <ctx: manual|auto>
 # `hybrid-mount vfs rule add <virtual> <real> --uid UID`. UID 0 means every process, so it is refused.
 # Rules are runtime-only; boot-mount reapplies them. doctor may exit 0 when the provider is down,
 # so availability is checked via "responds": true in `vfs doctor --json`.
+vfs_ready_cached() { # status is polled every few seconds; do not run doctor each time
+  [ -x "$HM" ] || return 1
+  _vc=$DATA_DIR/.vfs_cache
+  _vn=$(date +%s); _vt=$(stat -c %Y "$_vc" 2>/dev/null || echo 0)
+  if [ -s "$_vc" ] && [ $((_vn - _vt)) -lt 30 ]; then
+    [ "$(cat "$_vc")" = "1" ]
+    return
+  fi
+  if vfs_ready; then echo 1 > "$_vc"; return 0; fi
+  echo 0 > "$_vc"
+  return 1
+}
+
 vfs_ready() {
   VFS_MSG=""
   [ -x "$HM" ] || { VFS_MSG="Hybrid Mount is not installed"; return 1; }
@@ -1060,6 +964,11 @@ entry_vfs_add() {
     say "[!] $E_ID: VFS needs an installed app. Set pkg=<package.name> (UID 0 would redirect every process)."
     return 1
   }
+  # at boot the Hybrid Mount provider can come up later than this script
+  if [ -n "$UD_BOOT" ] && [ -x "$HM" ]; then
+    _w=0
+    while ! vfs_ready && [ "$_w" -lt 15 ]; do sleep 2; _w=$((_w + 1)); done
+  fi
   vfs_ready || { say "[!] $E_ID: $VFS_MSG"; return 1; }
   _ok=0
   for _d in $(vfs_virtual_paths); do
@@ -1076,6 +985,7 @@ entry_vfs_add() {
       say "[!] $E_ID: vfs $_d failed: $_r"
     fi
   done
+  [ "$_ok" -eq 1 ] && boot_id > "$_sf.boot"
   [ "$_ok" -eq 1 ]
 }
 
@@ -1140,7 +1050,7 @@ entry_umount() { # <id> <force>
     esac
   done
   if [ $_bad -eq 0 ]; then
-    rm -f "$_sf"
+    rm -f "$_sf" "$_sf.boot"
     say "[+] $1 unmounted"
     [ "$E_STOP" = "1" ] && [ -n "$E_PKG" ] && am force-stop "$E_PKG" 2>/dev/null
     return 0
@@ -1229,7 +1139,10 @@ bind_edit() {
 entry_fixwrite() {
   entry_get "$1" || { echo "no folder mount named '$1'"; return 1; }
   [ -d "$E_SRCP" ] || { echo "source folder $E_SRCP does not exist"; return 1; }
-  entry_open_rw
+  find "$E_SRCP" -xdev ! -type l -exec chgrp 1023 {} + 2>&1 | tail -n 3
+  find "$E_SRCP" -xdev ! -type l -exec chmod g+rwX {} + 2>&1 | tail -n 3
+  find "$E_SRCP" -xdev -type d -exec chmod g+s {} + 2>&1 | tail -n 3
+  say "[+] $E_ID: $E_SRCP is now group media_rw (1023), group-writable, setgid"
 }
 
 # entry_test <id>: write/read/mkdir test at a folder mount.
@@ -1237,6 +1150,7 @@ entry_fixwrite() {
 entry_test() {
   entry_get "$1" || { echo "status=off"; echo "msg=no such folder mount"; return 1; }
   if [ "$(entry_state "$E_ID")" != "mounted" ]; then echo "status=off"; echo "msg=Not mounted"; return 0; fi
+  [ "$E_MODE" = "vfs" ] && { entry_test_vfs; return; }
   _dst=$(entry_dsts | head -n 1)
   _tn=.ud_rw_test_$$
   _st=ok; _msg="Read and write work (as root and as the Android media daemon)"
@@ -1365,18 +1279,20 @@ cmd_bind() {
       if [ "$1" = "all" ]; then each_entry entry_umount "$_f"; else valid_id "$1" && entry_umount "$1" "$_f"; fi
       _r=$?; unlock; return $_r ;;
     vfs-check)
-      if [ ! -x "$HM" ]; then echo "hybrid_mount metamodule not installed"; return 1; fi
-      "$HM" vfs doctor 2>&1 ;;
+      # `vfs doctor` can exit 0 while the provider is down, so use vfs_ready
+      vfs_ready; _r=$?
+      echo "$VFS_MSG"
+      return $_r ;;
     packages)
       # list installed packages with their uid (for the VFS picker)
       _filt=${1:-""}
-      pm list packages -U 2>/dev/null | while IFS= read -r _line; do
-        _pkg=$(echo "$_line" | sed 's/^package://;s/ uid:[0-9]*//')
-        _uid=$(echo "$_line" | sed -n 's/.*uid:\([0-9]*\).*/\1/p')
-        [ -z "$_uid" ] && _uid=$(pkg_uid "$_pkg")
-        if [ -z "$_filt" ] || echo "$_pkg" | grep -qi "$_filt"; then
-          echo "pkg=$_pkg|uid=${_uid:-?}"
-        fi
+      pm list packages -U 2>/dev/null | { if [ -n "$_filt" ]; then grep -iF -- "$_filt"; else cat; fi; } | while IFS= read -r _line; do
+        case "$_line" in package:*) ;; *) continue ;; esac
+        _pkg=${_line#package:}; _pkg=${_pkg%% *}
+        _uid=""
+        case "$_line" in *" uid:"*) _uid=${_line##* uid:}; _uid=${_uid%% *} ;; esac
+        [ -n "$_uid" ] || _uid=$(pkg_uid "$_pkg")
+        echo "pkg=$_pkg|uid=${_uid:-?}"
       done ;;
     *) echo "usage: bind list | add|edit <id> <src> <dst> [opts] | test <id> | vfs-test <id> | fixwrite <id> | del <id> | mount <id|all> | umount <id|all> [force] | vfs-check | packages [filter]"; return 2 ;;
   esac
@@ -1439,9 +1355,9 @@ cmd_access() {
 
 cmd_layout() {
   load_conf
-  echo "config  : DEV=$DEV_CFG (offset $DEV_OFFSET)"
+  echo "config  : DEV=$DEV_CFG PART_NAME=$PART_NAME"
   echo "layout  : ${LAYOUT:-n/a}"
-  echo "device  : ${DEV:-none} $( [ -b "$DEV_REAL" ] && echo '(exists)' || echo '(missing)')"
+  echo "device  : ${DEV_REAL:-none} $( [ -b "$DEV_REAL" ] && echo '(exists)' || echo '(missing)')"
 }
 
 cmd_fsck() {
@@ -1530,11 +1446,7 @@ cmd_diag() {
 cmd_set() {
   case "$1" in AUTOMOUNT|FIX_ROOT_PERMS|DISABLE_DATA_MOUNT) ;; *) echo "unsupported key"; return 2 ;; esac
   case "$2" in 0|1) ;; *) echo "value must be 0 or 1"; return 2 ;; esac
-  cmd_init_config
-  grep -v "^$1=" "$CONF" > "$CONF.tmp" 2>/dev/null
-  echo "$1=$2" >> "$CONF.tmp"
-  cat "$CONF.tmp" > "$CONF"
-  rm -f "$CONF.tmp"
+  conf_put "$1" "$2"
   echo "$1=$2"
   if [ "$1" = "DISABLE_DATA_MOUNT" ] && [ "$2" = "1" ] && mounted_ours; then
     echo "note: the partition is still mounted; unmount it for the change to take effect"
@@ -1578,10 +1490,91 @@ cmd_log() {
 }
 
 # ------------------------------------------------------------------------------
+# Partition name (/dev/block/by-name/<name>)
+# ------------------------------------------------------------------------------
+# pt_check <name>: is there a usable ext4 partition with that name? Prints status= msg= device= partname=.
+# Returns 0 ok, 2 bad name, 4 absent, 11 refused (protected), 12 not ext4 / encrypted.
+pt_check() {
+  if ! valid_partname "$1"; then
+    echo "status=fail"; echo "msg=invalid name (letters, digits, . _ - only)"
+    return 2
+  fi
+  use_partname "$1"
+  preflight; _ptr=$?
+  echo "device=$DEV_REAL"
+  echo "partname=$DEV_PARTNAME"
+  if [ $_ptr -eq 0 ]; then
+    echo "status=ok"
+    echo "msg=${PF_WARN:-found $DEV_REAL (ext4)}"
+    return 0
+  fi
+  echo "status=fail"
+  echo "msg=$PF_MSG"
+  [ $_ptr -eq 10 ] && return 4
+  return $_ptr
+}
+
+# switch to another partition name: test, unmount the old one, save, mount the new one (rolls back on failure)
+pt_apply() { # <name> <force 0|1>
+  _pa_new=$1; _pa_force=$2
+  _pa_old=$PART_NAME; _pa_oldcfg=$DEV_CFG; _pa_oldreal=$DEV_REAL
+  _pa_was=0; mounted_ours && _pa_was=1
+  pt_check "$_pa_new"; _pa_rc=$?
+  if [ $_pa_rc -ne 0 ]; then
+    say "[!] partition not changed (still '$_pa_old')"
+    return $_pa_rc
+  fi
+  if [ "$_pa_was" = 1 ] && [ "$DEV_REAL" = "$_pa_oldreal" ]; then
+    conf_put PART_NAME "$_pa_new"; conf_put DEV auto
+    say "[=] $_pa_new is already mounted from $DEV_REAL"
+    return 0
+  fi
+  if [ "$_pa_was" = 1 ]; then
+    say "[-] Unmounting the current partition first"
+    do_umount "$_pa_force"; _pa_rc=$?
+    if [ $_pa_rc -ne 0 ]; then
+      say "[!] partition not changed (still '$_pa_old')"
+      return $_pa_rc
+    fi
+  fi
+  conf_put PART_NAME "$_pa_new"; conf_put DEV auto
+  do_mount; _pa_rc=$?
+  case $_pa_rc in
+    0|13|14) return $_pa_rc ;;   # 13: locked, 14: mount disabled; the new name is kept
+  esac
+  say "[!] mounting '$_pa_new' failed; going back to '$_pa_old'"
+  conf_put PART_NAME "$_pa_old"; conf_put DEV "$_pa_oldcfg"
+  [ "$_pa_was" = 1 ] && do_mount
+  return $_pa_rc
+}
+
+cmd_partition() {
+  _sub=$1; [ $# -gt 0 ] && shift
+  case "$_sub" in
+    get)
+      echo "part_name=$PART_NAME"
+      echo "device=$DEV_REAL" ;;
+    test)
+      pt_check "$1"; return $? ;;
+    set)
+      _pn=$1; _pf=0; [ "$2" = "force" ] && _pf=1
+      if ! valid_partname "$_pn"; then
+        echo "status=fail"; echo "msg=invalid name (letters, digits, . _ - only)"
+        return 2
+      fi
+      lock || return 1
+      pt_apply "$_pn" "$_pf"; _r=$?
+      unlock; return $_r ;;
+    *) echo "usage: partition get | test <name> | set <name> [force]"; return 2 ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
 # Boot + live description
 # ------------------------------------------------------------------------------
 cmd_boot_mount() {
   load_conf
+  UD_BOOT=1; export UD_BOOT
   _log "=== boot-mount === DEV=$DEV_REAL boot_completed=$(getprop sys.boot_completed) ce=$(getprop sys.user.0.ce_available) sd_base_exists=$([ -d "$SD_BASE" ] && echo yes || echo no)"
   _i=0
   while ! ce_ready; do
@@ -1668,6 +1661,7 @@ main() {
       r=$?; unlock; exit $r ;;
     bind)          cmd_bind "$@"; exit $? ;;
     set)           cmd_set "$1" "$2" ;;
+    partition)     cmd_partition "$@"; exit $? ;;
     browse)        cmd_browse "$1"; exit $? ;;
     mkdir)         cmd_mkdir "$1"; exit $? ;;
     fixperms)      cmd_fixperms "$1" ;;
@@ -1683,7 +1677,7 @@ main() {
     init-config)   : ;;
     packages)      cmd_bind packages "$@"; exit $? ;;
     *)
-      sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,/^# =====/p' "$0" | sed 's/^# \{0,1\}//'
       exit 2 ;;
   esac
 }

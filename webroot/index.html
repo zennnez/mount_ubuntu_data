@@ -902,6 +902,17 @@
           </div>
         </section>
 
+        <section class="card">
+          <h2>Partition</h2>
+          <div class="form">
+            <label>Partition name <small>(/dev/block/by-name/…)</small>
+              <input id="pName" type="text" value="data" maxlength="36" autocapitalize="off" autocomplete="off"
+                spellcheck="false"></label>
+            <button id="pApply" type="button">Test &amp; mount</button>
+            <div id="pHint" class="hint">Changing the name checks that the partition exists and is ext4, then unmounts
+              the current one and mounts the new one right away.</div>
+          </div>
+        </section>
 
         <section class="card">
           <h2>Support</h2>
@@ -939,11 +950,14 @@
               <label>Method
                 <select id="fMode">
                   <option value="bind">Bind mount (real mount, works everywhere)</option>
-                  <option value="vfs">Hybrid Mount VFS redirect (no mount entry, experimental)</option>
-                  <option value="auto">Auto (VFS if available, else bind)</option>
+                  <option value="vfs">Hybrid Mount VFS redirect (one app only, experimental)</option>
                 </select></label>
+              <label id="fPkgRow" class="hidden">App package (the only app that sees folder A)
+                <input id="fPkg" type="text" list="pkgList" placeholder="com.example.game" maxlength="120"
+                  autocapitalize="off" autocomplete="off" spellcheck="false">
+                <datalist id="pkgList"></datalist></label>
               <label class="chk"><input id="fOwner" type="checkbox"><span>Let the target app read and write folder A
-                  <small>Folder mounts are mounted read-write, and folder A is made writable for Android (group media_rw). Turn this on when folder B is an app's own folder (<code>Android/data/&lt;package&gt;</code> or <code>Android/obb/&lt;package&gt;</code>): that app can write too. Files stay owned by your Ubuntu user.</small></span></label>
+                  <small>Turn this on when folder B is an app's own folder (<code>Android/data/&lt;package&gt;</code> or <code>Android/obb/&lt;package&gt;</code>): the top of folder A is handed to that app (chown, mode 2770). Nothing else is changed.</small></span></label>
               <label class="chk"><input id="fStop" type="checkbox"><span>Stop the app when mounting/unmounting
                   <small>Force-stops the app so it picks up the new folder instead of keeping the old view.</small></span></label>
               <label class="chk"><input id="fAuto" type="checkbox" checked><span>Mount at boot</span></label>
@@ -1007,7 +1021,7 @@
       const SCRIPT = '/data/adb/modules/mount_ubuntu_data/ubuntu-data.sh';
       const $ = (id) => document.getElementById(id);
       const hasBridge = typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function';
-      let busy = false, cur = {}, timer = null;
+      let busy = false, cur = {}, timer = null, pApplying = false;
 
       // ---- root shell bridge (KernelSU WebUI API) -------------------------------
       function sh(cmd) {
@@ -1054,7 +1068,7 @@
         $('dot').className = 'dot ' + st;
         $('stateText').textContent = LABEL[st] || 'Unknown';
         $('vDev').textContent = (s.device || '–') + (s.partname ? ' (' + s.partname + ')' : '');
-        $('vLayout').textContent = s.dev_cfg === 'auto' ? (s.layout || 'auto: no userdata partition found') : 'set manually in config.sh';
+        $('vLayout').textContent = s.dev_cfg === 'auto' ? (s.layout || ('by-name/' + (s.part_name || 'data') + ' not found')) : 'set manually in config.sh (DEV)';
         $('vFs').textContent = st === 'mounted' ? `${s.fstype || 'ext4'} · ${s.mode || ''}` : '–';
         $('vSd').textContent = s.sdcard_path || '–';
         $('vView').textContent = st !== 'mounted' ? '–' : ({ ok: 'Yes', missing: 'Not yet', 'n/a': 'Unknown' }[s.android_view] || '–');
@@ -1077,6 +1091,8 @@
         b.textContent = m ? 'Unmount' : (st === 'absent' ? 'Partition not found' : (st === 'disabled' ? 'Partition mount disabled' : 'Mount'));
         b.disabled = busy || st === 'absent' || st === 'waiting' || st === 'conflict' || st === 'disabled';
         $('auto').checked = s.automount === '1';
+        if (document.activeElement !== $('pName') && !pApplying) $('pName').value = s.part_name || 'data';
+        $('pApply').disabled = busy || pApplying;
         for (const id of ['bFsck', 'bMedia', 'bDiag', 'bLog', 'bAccess', 'bRead', 'bWrite']) $(id).disabled = busy;
         for (const id of ['bAccess', 'bRead', 'bWrite']) $(id).disabled = busy || !m;
         $('bFsck').disabled = busy || m || st === 'absent' || st === 'disabled';
@@ -1130,13 +1146,28 @@
       let vfsOk = false;
       const PATH_RE = /^[A-Za-z0-9_.@\/+-]+$/, ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
       let editing = null;   // id of the folder mount being edited, or null when adding
+      const pkgFromDst = (d) => { const m = /(?:^|\/)Android\/(?:data|obb)\/([A-Za-z0-9_.]+)/.exec(d || ''); return m ? m[1] : ''; };
+      const PKG_RE = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$/;
+      let pkgsLoaded = false;
+      async function loadPkgs() {
+        if (pkgsLoaded) return; pkgsLoaded = true;
+        const r = await ud('packages');
+        const dl = $('pkgList'); dl.textContent = '';
+        r.out.split('\n').forEach((l) => {
+          const m = /^pkg=([^|]+)\|uid=/.exec(l); if (!m) return;
+          const o = document.createElement('option'); o.value = m[1]; dl.appendChild(o);
+        });
+      }
       function applyMethodState() {
         const sel = $('fMode');
         for (const o of sel.options) o.disabled = o.value !== 'bind' && !vfsOk;
         if (!vfsOk && !editing) sel.value = 'bind';
-        // no Hybrid Mount: the dropdown is locked to "Bind mount" (an old VFS/Auto entry may still be switched to bind)
+        // no Hybrid Mount: the dropdown is locked to "Bind mount" (an old VFS entry may still be switched to bind)
         sel.disabled = !vfsOk && sel.value === 'bind';
-        $('fHint').textContent = vfsOk ? 'Hybrid Mount VFS provider detected.' : 'Hybrid Mount is not available (metamodule or kernel provider missing), so only Bind mount can be used.';
+        const isVfs = sel.value === 'vfs';
+        $('fPkgRow').classList.toggle('hidden', !isVfs);
+        if (isVfs) { if (!$('fPkg').value.trim()) $('fPkg').value = pkgFromDst(picked.dst); loadPkgs(); }
+        $('fHint').textContent = vfsOk ? 'Hybrid Mount VFS provider is responding.' : 'Hybrid Mount is not available (metamodule or kernel provider missing), so only Bind mount can be used.';
       }
       async function checkVfs() {
         const r = await ud('bind vfs-check');
@@ -1172,7 +1203,7 @@
         const r = await ud('bind list');
         const box = $('entries'); box.textContent = '';
         const list = r.out.split('\n').filter((l) => l.startsWith('entry=')).map((l) => {
-          const [id, state, mode, auto, src, dst, owner, stop] = l.slice(6).split('|'); return { id, state, mode, auto, src, dst, owner, stop };
+          const [id, state, mode, auto, src, dst, owner, stop, pkg] = l.slice(6).split('|'); return { id, state, mode, auto, src, dst, owner, stop, pkg: pkg || '' };
         });
         entCache = list;
         if (!list.length) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = 'No folder mounts yet.'; box.appendChild(d); return; }
@@ -1186,7 +1217,7 @@
       let testRun = false;
       const ICON = { ok: '✔', fail: '✖', warn: '❗', busy: '…' };
       const TITLE = { ok: 'Read/write OK', fail: 'Read/write failed', warn: 'Works with a warning', busy: 'Testing…' };
-      const sigOf = (e) => [e.src, e.dst, e.mode, e.state].join('|');
+      const sigOf = (e) => [e.src, e.dst, e.mode, e.state, e.pkg].join('|');
       function stIcon(e) {
         const t = tests[e.id], ok = t && t.sig === sigOf(e);
         const b = document.createElement('button'); b.type = 'button';
@@ -1244,7 +1275,8 @@
         editing = e.id;
         $('fId').value = e.id; $('fId').disabled = true;
         setPicked('src', e.src); setPicked('dst', e.dst);
-        $('fMode').value = ['bind', 'vfs', 'auto'].includes(e.mode) ? e.mode : 'bind';
+        $('fMode').value = e.mode === 'vfs' ? 'vfs' : 'bind';
+        $('fPkg').value = e.mode === 'vfs' ? (e.pkg || '') : '';
         $('fOwner').checked = e.owner === 'auto';
         $('fStop').checked = e.stop === '1';
         $('fAuto').checked = e.auto !== '0';
@@ -1259,7 +1291,7 @@
         editing = null;
         $('fId').disabled = false; $('fId').value = '';
         setPicked('src', ''); setPicked('dst', '');
-        $('fMode').value = 'bind'; $('fOwner').checked = false; $('fStop').checked = false; $('fAuto').checked = true;
+        $('fMode').value = 'bind'; $('fPkg').value = ''; $('fOwner').checked = false; $('fStop').checked = false; $('fAuto').checked = true;
         $('fAdd').textContent = 'Add'; $('addSum').textContent = 'Add folder mount';
         $('fCancel').classList.add('hidden'); applyMethodState();
       }
@@ -1306,6 +1338,7 @@
         const el = $(kind === 'src' ? 'fSrcV' : 'fDstV');
         el.textContent = v ? toLabel(kind, v) : 'Not selected';
         el.classList.toggle('set', !!v);
+        if (kind === 'dst' && v && !$('fPkg').value.trim()) $('fPkg').value = pkgFromDst(v);
         if (kind === 'src' && v && !$('fId').value.trim()) {
           const base = (v === '@' ? 'ubuntu' : v.split('/').filter(Boolean).pop() || 'folder').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 32);
           $('fId').value = base;
@@ -1383,7 +1416,9 @@
         if (!ID_RE.test(id)) return toast('Name: letters, digits, - and _');
         if (!PATH_RE.test(src) || src.includes('..')) return toast('Folder A has invalid characters');
         if (!PATH_RE.test(dst) || dst.includes('..')) return toast('Folder B has invalid characters');
-        const opts = ['mode=' + $('fMode').value, 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
+        const mode = $('fMode').value, pkg = $('fPkg').value.trim();
+        if (mode === 'vfs' && !PKG_RE.test(pkg)) return toast('Enter the app package, e.g. com.example.game');
+        const opts = ['mode=' + mode, ...(mode === 'vfs' ? ['pkg=' + pkg] : []), 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
         const wasEdit = !!editing;
         const r = await ud(['bind', wasEdit ? 'edit' : 'add', id, src, dst, ...opts].join(' '));
         if (r.code !== 0) { showOut(r.out + r.err); return toast(wasEdit ? 'Not saved' : 'Not added'); }
@@ -1397,6 +1432,42 @@
         const r = await sh('am start --user 0 -a android.intent.action.VIEW -d https://t.me/kokernel >/dev/null 2>&1');
         if (r.code !== 0) window.open('https://t.me/kokernel', '_blank');
       });
+
+      // ---- partition name ----------------------------------------------------------
+      const PNAME_RE = /^[A-Za-z0-9_.-]{1,36}$/;
+      async function applyPartName() {
+        if (pApplying || busy || !hasBridge) return;
+        const name = $('pName').value.trim(), was = cur.part_name || 'data';
+        if (name === was) { $('pHint').textContent = 'Partition name unchanged (' + was + ').'; return; }
+        if (!PNAME_RE.test(name) || name.startsWith('-') || name === '.' || name === '..') {
+          $('pHint').textContent = '✖ Name: letters, digits, . _ - only'; $('pName').value = was; return;
+        }
+        pApplying = true; $('pApply').disabled = true;
+        $('pHint').textContent = 'Checking ' + name + '…';
+        const t = await ud('partition test ' + name);
+        const o = parse(t.out);
+        if (t.code !== 0 || o.status !== 'ok') {
+          $('pHint').textContent = '✖ ' + (o.msg || t.err.trim() || 'Partition test failed') + ' (still using ' + was + ')';
+          toast('Partition not usable'); $('pName').value = was; pApplying = false; $('pApply').disabled = busy;
+          return;
+        }
+        $('pHint').textContent = '✔ ' + o.msg + ' · switching…';
+        busy = true; render(cur);
+        let r = await ud('partition set ' + name);
+        if (r.code === 5 && await confirmBox('The current partition is still in use (Ubuntu running or a file manager open). Force a lazy unmount and switch anyway? Open files may lose unsaved writes.')) {
+          r = await ud('partition set ' + name + ' force');
+        }
+        busy = false; pApplying = false;
+        showOut(r.out + (r.err ? '\n' + r.err : ''));
+        await refresh();
+        const now = cur.part_name || was;
+        $('pName').value = now;
+        $('pHint').textContent = r.code === 0 ? ('✔ Now using ' + now + '.') : (now === name ? ('Saved ' + name + ', but it is not mounted yet. See details below.') : ('✖ Not switched, still using ' + now + '. See details below.'));
+        toast(r.code === 0 ? 'Switched to ' + now : 'Not switched');
+      }
+      $('pApply').onclick = applyPartName;
+      $('pName').addEventListener('change', applyPartName);
+      $('pName').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('pName').blur(); } });
 
       // ---- boot ------------------------------------------------------------------
       if (!hasBridge) { $('nobridge').classList.remove('hidden'); $('stateText').textContent = 'No root bridge'; $('main').textContent = 'Unavailable'; }

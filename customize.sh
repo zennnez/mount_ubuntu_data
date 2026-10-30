@@ -28,7 +28,12 @@ fix_crlf "$MODPATH/ubuntu/setup-sharing.sh"
 fix_crlf "$MODPATH/module.prop"
 fix_crlf "$MODPATH/sepolicy.rule"
 
-ui_print "Mount Ubuntu Data  v2.6"
+# version comes from module.prop, so it can not drift again
+_ver=$(grep -m1 '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
+ui_print "Mount Ubuntu Data  ${_ver:-}"
+
+# repo files that must not end up on the device
+rm -f "$MODPATH/.gitattributes" "$MODPATH/.editorconfig" "$MODPATH/pack.py"
 
 ui_print "- Setting permissions..."
 set_perm_recursive "$MODPATH" 0 0 0755 0644
@@ -41,7 +46,7 @@ set_perm "$MODPATH/ubuntu/setup-sharing.sh" 0 0 0755
 # create config.sh once; an existing one (your edits) is kept
 sh "$MODPATH/ubuntu-data.sh" init-config
 
-ui_print "- Detecting valid partition..."
+ui_print "- Looking for the partition (/dev/block/by-name/<PART_NAME>)..."
 sh "$MODPATH/ubuntu-data.sh" layout 2>/dev/null | while read -r l; do ui_print "  $l"; done
 
 ui_print "- Support: t.me/kokernel"

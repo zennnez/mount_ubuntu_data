@@ -7,10 +7,13 @@
 Mounts the Ubuntu data partition (ext4) at `/data/media/0/ubuntu`, which Android shows as
 **`/sdcard/ubuntu`**. Ubuntu uses the same partition as **`/data`**, so both systems see the same files.
 
-**The partition is auto-detected.** The layout is: Android `userdata`, then `esp`, `linux`, and Ubuntu `/data`.
-So the Ubuntu data partition is *userdata + 3* (userdata sda15 gives sda18). `DEV=auto` and `DEV_OFFSET=3` in
-`config.sh` do this; set `DEV=/dev/block/sdaNN` to override. If the partition does not exist, the module does nothing.
-`ubuntu-data.sh layout` (or the WebUI row "Detected as") shows what it found.
+**The partition is found by name:** `/dev/block/by-name/data` (also tried: `/dev/block/bootdevice/by-name/data`).
+Change the name in the WebUI **Partition** box (or `ubuntu-data.sh partition set <name>`): the module checks that the
+partition exists and is ext4, unmounts the current one, saves the new name and mounts the new one right away. If the new one
+cannot be mounted it goes back to the old one. A name that does not exist, is not ext4, is LUKS, or is a protected system
+partition (userdata, metadata, boot, ...) is refused and nothing changes. Set `DEV=/dev/block/sdaNN` in `config.sh` to bypass
+the name lookup. If the partition does not exist, the module does nothing.
+`ubuntu-data.sh layout` (or the WebUI row "Detected as") shows what the name resolves to.
 
 ## Does Android encryption encrypt this partition?
 
@@ -20,7 +23,8 @@ files on it are stored in plain text. Two consequences:
 
 * **Anyone with physical access can read that partition**, since it is not protected by your lock screen.
 * The mount point `/data/media/0/ubuntu` is a folder *inside* encrypted userdata. It cannot be
-  created or mounted until you have unlocked the device once after boot.
+  created or mounted until you have unlocked the device once after boot. The old module tried at
+  `post-fs-data`, before that, so it silently failed. This version waits for the first unlock.
 
 The module refuses to mount if it finds a LUKS header or a non-ext4 filesystem on the device.
 It also refuses protected system partitions (userdata, metadata, persist, boot, ...) and Android's own `/data`.
@@ -87,7 +91,7 @@ Keep secrets (ssh keys, tokens) on a different folder or partition if that matte
 `fscontext=`+`defcontext=`, then plain). If it ends up plain, the status shows a warning and the included
 `sepolicy.rule` (media provider may access unlabeled files, nothing else) is the safety net; reboot after installing.
 
-## [UNDER DEVELOPMENT] Folder mounts (folder A inside folder B)
+## Folder mounts (folder A inside folder B)
 
 Mount any folder onto any other, for example a folder of the Ubuntu partition as a game's data folder.
 Manage them in the WebUI ("Folder mounts", folders are chosen with a folder picker) or in `/data/adb/mount_ubuntu_data/binds.conf`:
@@ -101,14 +105,15 @@ Manage them in the WebUI ("Folder mounts", folders are chosen with a folder pick
   (`/mnt/androidwritable/...`, `/mnt/pass_through/...`), because that is where an app's own
   `Android/data/<package>` is bound from. An absolute path is mounted as given, anywhere except a small deny-list
   (`/`, `/data`, `/data/adb`, `/system`, ...).
-* **Options:** `mode=bind|vfs|auto` (default `bind`), `owner=none|auto|UID:GID`, `auto=0|1` (mount at boot),
-  `stop=0|1` (force-stop the app on mount/unmount), `uid=N` (VFS only).
-* **`owner=auto`:** for `Android/data/<pkg>` or `Android/obb/<pkg>` the app's uid is also granted write access (the top of folder A is chowned to the app; existing files stay owned by the Ubuntu user and get other-write). Every folder mount, with or without this option, is forced read-write and group `media_rw` can write. Files you copy in later from Ubuntu must stay group-accessible; use `umask 002` in Ubuntu, or **Fix permissions**.
+* **Options:** `mode=bind|vfs` (default `bind`), `owner=none|auto|UID:GID`, `auto=0|1` (mount at boot),
+  `stop=0|1` (force-stop the app on mount/unmount), `pkg=<package>` (required for `mode=vfs`), `uid=N` (VFS only).
+  An old `mode=auto` line is read as `vfs` when it has `pkg=`/`uid=`, otherwise as `bind`.
+* **`owner=auto`:** for `Android/data/<pkg>` or `Android/obb/<pkg>` the app's uid is also granted write access (the top of folder A is chowned to the app; existing files stay owned by the Ubuntu user and get other-write). Folder mounts are plain bind mounts (`mount --bind`), nothing is forced. If an app cannot write, tap the status mark of the folder mount: after a permission failure it offers `bind fixwrite <id>` (group `media_rw`, group-writable, setgid). Files you copy in later from Ubuntu must stay group-accessible; use `umask 002` in Ubuntu.
 * Mount **before** starting the game, or use `stop=1`. An app that is already running keeps its old view.
 * CLI: `ubuntu-data.sh bind list | add <id> <A> <B> [opts] | del <id> | mount <id|all> | umount <id|all> [force]`.
   Unmounting the partition unmounts all folder mounts first.
 
-## [UNDER DEVELOPMENT] Overlayfs, Hybrid Mount and detectability
+## Overlayfs, Hybrid Mount and detectability
 
 This module does **not** use overlayfs. It makes a real ext4 mount of the Ubuntu partition and plain bind mounts. They
 show up in `/proc/self/mountinfo` of every process that shares the mount namespace, including apps, and
@@ -121,15 +126,15 @@ entry and can be limited to one app uid, so it is the only way here to make a ga
 that one app only. `mode=vfs` uses `hybrid-mount vfs rule add <B> <A> --uid <app uid>` when the metamodule and the kernel
 provider (`hybrid-mount vfs doctor`) are present. Treat it as **experimental**: Hybrid Mount documents
 redirecting files and `--opaque` directories, and does not document redirecting a whole directory, so check that the
-game actually sees the data. `mode=auto` uses VFS when available and falls back to a bind mount; `mode=vfs` never falls back.
-VFS rules are runtime-only; the module re-applies them on every boot.
+game actually sees the data. `mode=vfs` never falls back to a bind mount.
+VFS rules are runtime-only: the module re-applies them on every boot (and waits up to 30 s for the provider to come up).
 
 ## Config: `/data/adb/mount_ubuntu_data/config.sh`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `DEV` | `auto` | block device, or `auto` = userdata + `DEV_OFFSET` |
-| `DEV_OFFSET` | `3` | partitions after userdata (esp, linux, Ubuntu data) |
+| `DEV` | `auto` | block device, or `auto` = `/dev/block/by-name/<PART_NAME>` |
+| `PART_NAME` | `data` | partition name under `/dev/block/by-name/` (WebUI: Partition box) |
 | `PUBLISH_TOOLS` | `1` | copy the Ubuntu helper to `/.ubuntu-data-tools/` on the partition |
 | `MOUNT_NAME` | `ubuntu` | folder in internal storage |
 | `AUTOMOUNT` | `0` | mount after boot/unlock (off by default; switch it on in the WebUI) |
@@ -147,9 +152,34 @@ VFS rules are runtime-only; the module re-applies them on every boot.
 
 ## Support
 
-Questions, bugs, ideas: Telegram **https://t.me/kokernel**.
+Questions, bugs, ideas: Telegram **https://t.me/kokernel** (also linked in the WebUI).
 
-## Changes in v2.6
+## Dual boot option: disable the partition mount
+
+WebUI switch **Disable /data partition mount** (config key `DISABLE_DATA_MOUNT`, default `0` = off, the partition is mounted
+as before). This option is for **dual boot Android + Linux**, to mount the additional `sdaX` partition in both systems.
+**Do not use it if you do not dual boot.** When on, the module never mounts the partition (boot, Action button, WebUI
+Mount button); folder mounts whose source is an absolute path keep working. Turning it on unmounts the partition first.
+CLI: `ubuntu-data.sh set DISABLE_DATA_MOUNT 1|0`.
+
+## Changes in v2.7
+
+* **Boot fix: the v2.6 forced-read-write code is removed.** v2.6 re-mounted, remounted read-write and sometimes unmounted
+  bind mounts at boot (partition views, folder mounts, `EXTRA_BINDS`) and ran recursive permission changes on folder A while
+  Android was starting; devices could fail to boot. The partition mount (explicit `rw`, as before) and the folder mounts are
+  back to the plain v2.5 behaviour.
+* The partition is found as `/dev/block/by-name/<name>` (default `data`) instead of "userdata + 3". New **Partition** box in
+  the WebUI: on change it tests that the partition exists and is ext4, then remounts the new one instantly (rollback on failure).
+  CLI: `ubuntu-data.sh partition get | test <name> | set <name> [force]`. Existing `config.sh` files get `PART_NAME=data`.
+* Hybrid Mount VFS folder mounts (`mode=vfs`) are usable from the WebUI: app package field with a list of installed apps,
+  "Auto" method removed, and the read/write test for VFS entries runs as the app uid.
+* VFS fixes: rules from an earlier boot were treated as still active, so they were never re-applied after a reboot; the
+  provider check now looks at `"responds": true`; boot waits for the provider; `packages` is fast.
+* Installing no longer leaves `.gitattributes` in the module; the build script (`pack.py`) refuses CRLF/BOM and writes LF.
+* A background permission pass no longer keeps the WebUI/Action output waiting; the log no longer repeats the same line every
+  few seconds; stale lock directories are cleared.
+
+## Changes in v2.6 (read-write forcing was removed in v2.7)
 
 * Folder-to-folder mounts are read-write. On Android, `mount --bind` often comes up read-only, so the folder showed up but every write failed. The ext4 mount already passed an explicit `rw` option, which is why `sda18` → `/sdcard/ubuntu` worked. Each folder bind is now created with `rw` and remounted read-write. `/mnt/runtime/read` stays read-only on purpose.
 * Mounting a folder also opens it for Android: group `media_rw` (1023), setgid, group `rwX`. If folder B is `Android/data/<package>` or `Android/obb/<package>`, that app can write too, without taking the files away from your Ubuntu user.
