@@ -1,0 +1,11 @@
+# Keep every text file LF in the repo AND in the working tree on Windows.
+# CRLF in customize.sh / module.prop / *.sh makes the module fail to flash.
+* text=auto eol=lf
+*.sh text eol=lf
+*.rule text eol=lf
+*.prop text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+update-binary text eol=lf
+updater-script text eol=lf
+*.zip binary
