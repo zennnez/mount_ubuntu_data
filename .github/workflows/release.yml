@@ -1,279 +1,89 @@
 name: Release
 
-# Publishes a GitHub release when a pushed commit title contains [release].
-#
-#   git commit -m "Add sorting options [release]"     -> release
-#   git commit -m "[release] v1.3.0"                  -> release
-#   git commit -m "Fix typo"                          -> nothing happens
-#
-# The version, versionCode and name come from module.prop, so bump `version`
-# and `versionCode` there in the same push. The tag is the `version` value.
-# Run it by hand from the Actions tab (Run workflow) to retry a failed release.
-
+# Push a tag like v2.7 (must match version= in module.prop) to publish a release with the flashable zip.
+# "Run workflow" (manual) builds the zip and attaches it to the run as an artifact only.
 on:
   push:
-    branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: write # create the tag, the release and upload assets
-
-concurrency:
-  group: release
-  cancel-in-progress: false
+  contents: write   # needed to create the release with GITHUB_TOKEN
 
 jobs:
-  release:
-    name: Build and publish
+  build:
     runs-on: ubuntu-latest
-    # Cheap pre-filter so ordinary pushes never start a runner. It looks at the
-    # whole message; the first step then checks the commit titles exactly.
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(toJSON(github.event.commits.*.message), '[release]') }}
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
-          fetch-depth: 0 # full history and tags for release notes and the tag check
+          python-version: '3.x'
 
-      - name: Look for [release] in commit titles
-        id: detect
-        env:
-          EVENT: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
+      - name: Read module.prop
+        id: prop
         run: |
           set -eu
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "Manual run: releasing."
-            exit 0
-          fi
+          version=$(sed -n 's/^version=//p' module.prop | tr -d '\r' | head -n1)
+          code=$(sed -n 's/^versionCode=//p' module.prop | tr -d '\r' | head -n1)
+          [ -n "$version" ] && [ -n "$code" ] || { echo "module.prop needs version= and versionCode="; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
 
-          # Titles of every commit in this push. A new branch (all-zero BEFORE) or a
-          # force push (BEFORE missing locally) falls back to the newest commit only.
-          if [ "${BEFORE#0000000}" != "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            TITLES=$(git log -n 1 --format=%s "$AFTER")
-          else
-            TITLES=$(git log --format=%s "$BEFORE..$AFTER")
-          fi
-
-          if printf '%s\n' "$TITLES" | grep -qiF '[release]'; then
-            echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "Found [release] in a commit title."
-          else
-            echo "release=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::[release] appears in a commit message but not in a title, so no release was made."
-          fi
-
-      - name: Read and validate module.prop
-        id: meta
-        if: steps.detect.outputs.release == 'true'
+      - name: Tag must match module.prop
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          set -eu
-          fail() { echo "::error::$1"; exit 1; }
-
-          [ -f module.prop ] || fail "module.prop not found in the repository root."
-          prop() { sed -n "s/^$1=//p" module.prop | head -n 1 | tr -d '\r'; }
-          ID=$(prop id); NAME=$(prop name); VERSION=$(prop version); CODE=$(prop versionCode)
-
-          [ -n "$ID" ] && [ -n "$NAME" ] && [ -n "$VERSION" ] && [ -n "$CODE" ] \
-            || fail "module.prop needs id, name, version and versionCode."
-          printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
-            || fail "version '$VERSION' must look like v1.2.3 (or v1.2.3-beta1)."
-          case "$CODE" in ''|*[!0-9]*) fail "versionCode '$CODE' must be a whole number." ;; esac
-
-          if git rev-parse -q --verify "refs/tags/$VERSION" > /dev/null; then
-            fail "Tag $VERSION already exists. Bump version and versionCode in module.prop."
+          if [ "${GITHUB_REF_NAME}" != "${{ steps.prop.outputs.version }}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} != module.prop version ${{ steps.prop.outputs.version }}"
+            exit 1
           fi
 
-          # Nearest earlier release tag: used for the notes and the versionCode check
-          PREV=$(git describe --tags --abbrev=0 --match 'v*' 2> /dev/null || true)
-          if [ -n "$PREV" ]; then
-            PREV_CODE=$(git show "$PREV:module.prop" 2> /dev/null | sed -n 's/^versionCode=//p' | head -n 1 | tr -d '\r' || true)
-            case "$PREV_CODE" in ''|*[!0-9]*) PREV_CODE= ;; esac
-            if [ -n "$PREV_CODE" ] && [ "$CODE" -le "$PREV_CODE" ]; then
-              fail "versionCode $CODE must be higher than $PREV_CODE from $PREV, or managers will not offer the update."
-            fi
-          fi
-
-          {
-            echo "id=$ID"
-            echo "name=$NAME"
-            echo "version=$VERSION"
-            echo "code=$CODE"
-            echo "prev=$PREV"
-          } >> "$GITHUB_OUTPUT"
-          echo "Releasing $NAME $VERSION (versionCode $CODE), previous tag: ${PREV:-none}"
-
-      - name: Check scripts
-        if: steps.detect.outputs.release == 'true'
+      - name: Build zip (LF-normalised by pack.py)
         run: |
-          set -eu
-          # Syntax-check every shell script that ships in the module
-          BAD=0
-          for f in $(git ls-files '*.sh'); do
-            if sh -n "$f"; then echo "ok  $f"; else echo "::error file=$f::shell syntax error"; BAD=1; fi
-          done
-          [ "$BAD" = 0 ] || exit 1
-
-          # Syntax-check the WebUI's inline script and the bundled list
-          if [ -f webroot/index.html ]; then
-            T=$(mktemp -d)
-            python3 - "$T/ui.js" <<'PY'
-          import re, sys
-          html = open('webroot/index.html', encoding='utf-8').read()
-          blocks = re.findall(r'<script>(.*?)</script>', html, re.S)
-          if not blocks:
-              sys.exit('no inline <script> found in webroot/index.html')
-          open(sys.argv[1], 'w', encoding='utf-8').write(blocks[0])
+          python pack.py
+          ls -l *.zip
+          python - <<'PY'
+          import glob, zipfile
+          z = glob.glob('*.zip')
+          assert len(z) == 1, z
+          with zipfile.ZipFile(z[0]) as f:
+              names = f.namelist()
+              assert 'module.prop' in names and 'customize.sh' in names, names
+              assert not any(n.startswith('.git') or n == 'pack.py' for n in names), names
+              for n in names:
+                  assert b'\r' not in f.read(n), 'CR in ' + n
+          print('zip ok:', z[0])
           PY
-            node --check "$T/ui.js" || { echo "::error file=webroot/index.html::JavaScript syntax error"; exit 1; }
-            echo "ok  webroot/index.html"
-          fi
-          if [ -f webroot/db.js ]; then
-            node --check webroot/db.js || { echo "::error file=webroot/db.js::JavaScript syntax error"; exit 1; }
-            echo "ok  webroot/db.js"
-          fi
 
-      - name: Build the module zip
-        id: build
-        if: steps.detect.outputs.release == 'true'
-        env:
-          NAME: ${{ steps.meta.outputs.name }}
-          VERSION: ${{ steps.meta.outputs.version }}
+      - name: Release notes from README
         run: |
-          set -eu
-          # Git on some systems drops the executable bit
-          git ls-files '*.sh' | xargs chmod 755
+          # the "## Changes in <version>" section, up to the next "## "
+          v="${{ steps.prop.outputs.version }}"
+          awk -v h="## Changes in $v" '
+            index($0, h) == 1 { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' README.md > notes.md
+          [ -s notes.md ] || echo "Mount Ubuntu Data $v" > notes.md
+          cat notes.md
 
-          ZIP="${NAME// /-}-${VERSION}.zip"
-          OUT="$RUNNER_TEMP/$ZIP"
-          zip -r -9 -q "$OUT" . \
-            -x ".git/*" ".github/*" "docs/*" "tests/*" ".gitignore" ".gitattributes" "*.zip" "*.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: '*.zip'
+          if-no-files-found: error
 
-          # The manager needs module.prop at the zip root, and nothing from the repo extras
-          unzip -p "$OUT" module.prop | grep -q "^version=$VERSION\$" \
-            || { echo "::error::module.prop is not at the root of the zip."; exit 1; }
-          if unzip -Z1 "$OUT" | grep -Eq '^(\.git|\.github|docs|tests)/'; then
-            echo "::error::repository extras ended up in the zip."; exit 1
-          fi
-
-          (cd "$RUNNER_TEMP" && sha256sum "$ZIP" > "$ZIP.sha256")
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-          echo "Built $ZIP ($(wc -c < "$OUT") bytes, $(unzip -Z1 "$OUT" | grep -vc '/$') files)"
-
-      - name: Write release notes
-        if: steps.detect.outputs.release == 'true'
-        env:
-          NAME: ${{ steps.meta.outputs.name }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          PREV: ${{ steps.meta.outputs.prev }}
-          ZIP: ${{ steps.build.outputs.zip }}
-        run: |
-          set -eu
-          if [ -n "$PREV" ]; then RANGE="$PREV..HEAD"; else RANGE="HEAD"; fi
-
-          # One bullet per commit, with the [release] marker removed from the title
-          CHANGES=$(git log --no-merges --pretty='%h%x09%s' "$RANGE" | while IFS="$(printf '\t')" read -r h s; do
-            s=$(printf '%s' "$s" | sed -E 's/\[[Rr][Ee][Ll][Ee][Aa][Ss][Ee]\]//g; s/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]{2,}/ /g')
-            [ -n "$s" ] || continue
-            printf -- '- %s (%s)\n' "$s" "$h"
-          done)
-          [ -n "$CHANGES" ] || CHANGES="- No changes listed."
-
-          SHA=$(cut -d' ' -f1 "$RUNNER_TEMP/$ZIP.sha256")
-          {
-            echo "## $NAME $VERSION"
-            echo
-            echo "### Changes"
-            echo "$CHANGES"
-            echo
-            echo "### Install"
-            echo "1. Download **$ZIP** below."
-            echo "2. In your **KernelSU**, **APatch**, or **Magisk** manager open **Modules**, choose **Install** and select the zip."
-            echo "3. Reboot, then open the module's **WebUI** button to configure mount options and folder binds."
-            echo "4. Optional: enable **Hybrid Mount VFS** for per-app folder redirection (requires the Hybrid Mount metamodule)."
-            echo
-            echo "SHA-256: \`$SHA\`"
-          } > "$RUNNER_TEMP/notes.md"
-
-      - name: Publish the release
-        if: steps.detect.outputs.release == 'true'
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-          NAME: ${{ steps.meta.outputs.name }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          ZIP: ${{ steps.build.outputs.zip }}
         run: |
           set -eu
-          set --
-          # A version such as v1.3.0-beta1 is published as a pre-release
-          case "$VERSION" in *-*) set -- --prerelease ;; esac
-
-          gh release create "$VERSION" \
-            "$RUNNER_TEMP/$ZIP" "$RUNNER_TEMP/$ZIP.sha256" \
-            --title "$NAME $VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            --target "$GITHUB_SHA" \
-            "$@"
-
-          echo "Released **$NAME $VERSION**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$VERSION" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Update CHANGELOG.md and update.json
-        if: steps.detect.outputs.release == 'true'
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-          CODE: ${{ steps.meta.outputs.code }}
-          ZIP: ${{ steps.build.outputs.zip }}
-          PREV: ${{ steps.meta.outputs.prev }}
-        run: |
-          set -eu
-          if [ -n "$PREV" ]; then RANGE="$PREV..HEAD"; else RANGE="HEAD"; fi
-
-          CHANGES=$(git log --no-merges --pretty='%h%x09%s' "$RANGE" | while IFS="$(printf '\t')" read -r h s; do
-            s=$(printf '%s' "$s" | sed -E 's/\[[Rr][Ee][Ll][Ee][Aa][Ss][Ee]\]//g; s/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]{2,}/ /g')
-            [ -n "$s" ] || continue
-            printf -- '- %s (%s)\n' "$s" "$h"
-          done)
-          [ -n "$CHANGES" ] || CHANGES="- Minor maintenance and improvements."
-
-          DATE=$(date -u +%Y-%m-%d)
-          ENTRY=$(printf "## %s (%s)\n\n%s" "$VERSION" "$DATE" "$CHANGES")
-
-          python3 -c '
-          import sys, os
-          entry = sys.argv[1]
-          path = "CHANGELOG.md"
-          if os.path.exists(path):
-              old = open(path, "r", encoding="utf-8").read().strip()
-              if old.startswith("# Changelog"):
-                  content = "# Changelog\n\n" + entry + "\n\n" + old[len("# Changelog"):].lstrip()
-              else:
-                  content = "# Changelog\n\n" + entry + "\n\n" + old
-          else:
-              content = "# Changelog\n\n" + entry
-          open(path, "w", encoding="utf-8").write(content.strip() + "\n")
-          ' "$ENTRY"
-
-          python3 -c "
-          import json, os
-          v = os.environ['VERSION']
-          c = int(os.environ['CODE'])
-          z = os.environ['ZIP']
-          repo = os.environ['GITHUB_REPOSITORY']
-          d = {
-              'version': v,
-              'versionCode': c,
-              'zipUrl': f'https://github.com/{repo}/releases/download/{v}/{z}',
-              'changelog': f'https://raw.githubusercontent.com/{repo}/main/CHANGELOG.md'
-          }
-          open('update.json', 'w').write(json.dumps(d, indent=2) + '\n')
-          "
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md update.json
-          if ! git diff --cached --quiet; then
-            git commit -m "Update CHANGELOG.md and update.json for $VERSION [skip ci]"
-            git push origin HEAD:${{ github.ref_name }}
+          zip=$(ls *.zip)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$zip" --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" "$zip" \
+              --title "Mount Ubuntu Data ${GITHUB_REF_NAME}" --notes-file notes.md
           fi
