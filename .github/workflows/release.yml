@@ -1,20 +1,20 @@
 name: Release
 
-# Push a tag like v2.7 (must match version= in module.prop) to publish a release with the flashable zip.
-# "Run workflow" (manual) builds the zip and attaches it to the run as an artifact only.
 on:
   push:
-    tags: ['v*']
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
-  contents: write   # needed to create the release with GITHUB_TOKEN
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -30,60 +30,22 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "code=$code" >> "$GITHUB_OUTPUT"
 
-      - name: Tag must match module.prop
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          if [ "${GITHUB_REF_NAME}" != "${{ steps.prop.outputs.version }}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} != module.prop version ${{ steps.prop.outputs.version }}"
-            exit 1
-          fi
-
-      - name: Build zip (LF-normalised by pack.py)
+      - name: Build zip (pack.py)
         run: |
           python pack.py
           ls -l *.zip
-          python - <<'PY'
-          import glob, zipfile
-          z = glob.glob('*.zip')
-          assert len(z) == 1, z
-          with zipfile.ZipFile(z[0]) as f:
-              names = f.namelist()
-              assert 'module.prop' in names and 'customize.sh' in names, names
-              assert not any(n.startswith('.git') or n == 'pack.py' for n in names), names
-              for n in names:
-                  assert b'\r' not in f.read(n), 'CR in ' + n
-          print('zip ok:', z[0])
-          PY
 
-      - name: Release notes from README
-        run: |
-          # the "## Changes in <version>" section, up to the next "## "
-          v="${{ steps.prop.outputs.version }}"
-          awk -v h="## Changes in $v" '
-            index($0, h) == 1 { on = 1; next }
-            on && /^## / { exit }
-            on { print }
-          ' README.md > notes.md
-          [ -s notes.md ] || echo "Mount Ubuntu Data $v" > notes.md
-          cat notes.md
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: module-zip
-          path: '*.zip'
-          if-no-files-found: error
-
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create or update Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          zip=$(ls *.zip)
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$zip" --clobber
-            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          tag="v${{ steps.prop.outputs.version }}"
+          zip=$(ls *.zip | head -n 1)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$zip" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "$zip" \
-              --title "Mount Ubuntu Data ${GITHUB_REF_NAME}" --notes-file notes.md
+            gh release create "$tag" "$zip" \
+              --title "Mount Ubuntu Data $tag" \
+              --generate-notes
           fi

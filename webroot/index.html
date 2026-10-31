@@ -954,6 +954,10 @@
           <details id="addbox">
             <summary id="addSum">Add folder mount</summary>
             <div class="form">
+              <label id="fPkgRow">App Package (optional: select an app to auto-fill)
+                <input id="fPkg" type="text" list="pkgList" placeholder="e.g. com.example.game" maxlength="120"
+                  autocapitalize="off" autocomplete="off" spellcheck="false">
+                <datalist id="pkgList"></datalist></label>
               <label>Name<input id="fId" type="text" placeholder="game1" autocapitalize="off"
                   autocomplete="off"></label>
               <div>
@@ -973,10 +977,6 @@
                   <option value="bind">Bind mount (real mount, works everywhere)</option>
                   <option value="vfs">Hybrid Mount VFS redirect (one app only, experimental)</option>
                 </select></label>
-              <label id="fPkgRow" class="hidden">App package (the only app that sees folder A)
-                <input id="fPkg" type="text" list="pkgList" placeholder="com.example.game" maxlength="120"
-                  autocapitalize="off" autocomplete="off" spellcheck="false">
-                <datalist id="pkgList"></datalist></label>
               <label class="chk"><input id="fOwner" type="checkbox"><span>Let the target app read and write folder A
                   <small>Turn this on when folder B is an app's own folder (<code>Android/data/&lt;package&gt;</code> or <code>Android/obb/&lt;package&gt;</code>): the top of folder A is handed to that app (chown, mode 2770). Nothing else is changed.</small></span></label>
               <label id="fMoveRow" class="chk"><input id="fMove" type="checkbox"><span>Move existing files from folder B into folder A
@@ -1200,13 +1200,13 @@
         const sel = $('fMode');
         for (const o of sel.options) o.disabled = o.value !== 'bind' && !vfsOk;
         if (!vfsOk && !editing) sel.value = 'bind';
-        // no Hybrid Mount: the dropdown is locked to "Bind mount" (an old VFS entry may still be switched to bind)
         sel.disabled = !vfsOk && sel.value === 'bind';
         const isVfs = sel.value === 'vfs';
-        $('fPkgRow').classList.toggle('hidden', !isVfs);
         $('fMoveRow').classList.toggle('hidden', isVfs);
-        if (isVfs) { if (!$('fPkg').value.trim()) $('fPkg').value = pkgFromDst(picked.dst); loadPkgs(); }
-        $('fHint').textContent = vfsOk ? 'Hybrid Mount VFS provider is responding.' : 'Hybrid Mount is not available (metamodule or kernel provider missing), so only Bind mount can be used.';
+        loadPkgs();
+        $('fHint').textContent = isVfs
+          ? (vfsOk ? 'Hybrid Mount VFS provider is responding.' : 'Hybrid Mount is not available (metamodule or kernel provider missing), so only Bind mount can be used.')
+          : 'Bind mount works across all apps and storage views.';
       }
       async function checkVfs() {
         const r = await ud('bind vfs-check');
@@ -1214,7 +1214,19 @@
         applyMethodState();
       }
       $('fMode').addEventListener('change', applyMethodState);
-      $('addbox').addEventListener('toggle', () => { if ($('addbox').open) checkVfs(); });
+      $('fPkg').addEventListener('input', () => {
+        const pkg = $('fPkg').value.trim();
+        if (PKG_RE.test(pkg)) {
+          const base = pkg.split('.').pop() || pkg;
+          if (!editing) {
+            if (!$('fId').value.trim() || $('fId').value === 'game1') $('fId').value = base.slice(0, 32);
+            setPicked('src', '@/apps/' + base);
+            setPicked('dst', 'Android/data/' + pkg);
+            $('fOwner').checked = true;
+          }
+        }
+      });
+      $('addbox').addEventListener('toggle', () => { if ($('addbox').open) { checkVfs(); loadPkgs(); } });
       function entRow(e) {
         const row = document.createElement('div'); row.className = 'ent';
         const meta = document.createElement('div'); meta.className = 'meta';
@@ -1458,7 +1470,7 @@
         if (!PATH_RE.test(dst) || dst.includes('..')) return toast('Folder B has invalid characters');
         const mode = $('fMode').value, pkg = $('fPkg').value.trim();
         if (mode === 'vfs' && !PKG_RE.test(pkg)) return toast('Enter the app package, e.g. com.example.game');
-        const opts = ['mode=' + mode, ...(mode === 'vfs' ? ['pkg=' + pkg] : []), 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'move=' + (mode === 'bind' && $('fMove').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
+        const opts = ['mode=' + mode, ...(pkg ? ['pkg=' + pkg] : []), 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'move=' + (mode === 'bind' && $('fMove').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
         const wasEdit = !!editing;
         const r = await ud(['bind', wasEdit ? 'edit' : 'add', id, src, dst, ...opts].join(' '));
         if (r.code !== 0) { showOut(r.out + r.err); return toast(wasEdit ? 'Not saved' : 'Not added'); }
