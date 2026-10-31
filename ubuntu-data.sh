@@ -134,6 +134,7 @@ load_conf() {
   FIX_ROOT_PERMS=1
   DISABLE_DATA_MOUNT=0
   AUTOFIX_PERMS=0
+  DAEMON_ENABLED=0
   EXTRA_BINDS=""
   PUBLISH_TOOLS=1
   PARTNAME_DENY="userdata metadata persist* cache misc frp keystore devinfo oplusreserve* oem* modem* super boot* init_boot* vendor_boot* dtbo* vbmeta* recovery*"
@@ -151,6 +152,7 @@ load_conf() {
   [ -n "$DEV" ] || DEV=auto
   [ "$DISABLE_DATA_MOUNT" = "1" ] || DISABLE_DATA_MOUNT=0
   [ "$AUTOFIX_PERMS" = "1" ] || AUTOFIX_PERMS=0
+  [ "$DAEMON_ENABLED" = "1" ] || DAEMON_ENABLED=0
 
   SD_UUID=$(sm list-volumes public 2>/dev/null | sed -n 's/.*mounted \([0-9A-Fa-f-]*\).*/\1/p' | head -n 1)
   if [ -z "$SD_UUID" ] && [ -f "$DATA_DIR/sd_uuid" ]; then
@@ -192,6 +194,7 @@ cmd_init_config() {
     grep -q '^MOUNT_MODE=' "$CONF" 2>/dev/null || printf '\nMOUNT_MODE=sdcard\n' >> "$CONF"
     grep -q '^MOUNT_NAME=' "$CONF" 2>/dev/null || printf '\nMOUNT_NAME=ubuntu\n' >> "$CONF"
     grep -q '^AUTOFIX_PERMS=' "$CONF" 2>/dev/null || printf '\nAUTOFIX_PERMS=0\n' >> "$CONF"
+    grep -q '^DAEMON_ENABLED=' "$CONF" 2>/dev/null || printf '\nDAEMON_ENABLED=0\n' >> "$CONF"
     return 0
   fi
   cat > "$CONF" <<'EOF'
@@ -212,6 +215,8 @@ FIX_ROOT_PERMS=1
 DISABLE_DATA_MOUNT=0
 # 1 = once after mount, fix permissions for files Android cannot use
 AUTOFIX_PERMS=0
+# 1 = run background monitoring daemon in External mode (auto-heal + live description). Default 0 = off (saves battery).
+DAEMON_ENABLED=0
 # Extra bind mounts: "source:destination"
 EXTRA_BINDS=""
 # 1 = copy ubuntu/setup-sharing.sh onto the partition (/.ubuntu-data-tools/)
@@ -290,8 +295,13 @@ dev_in_use() {
   return 1
 }
 
+is_sdcard_bound() {
+  [ -n "$SD_UUID" ] || return 1
+  mnt_find "/mnt/media_rw/$SD_UUID" && [ -n "$DEV_MM" ] && [ "$MI_MM" = "$DEV_MM" ]
+}
+
 is_sdcard_mounted() {
-  mnt_find "$STAGING_DIR" && [ -n "$DEV_MM" ] && [ "$MI_MM" = "$DEV_MM" ] && [ -n "$SD_UUID" ] && [ -d "/storage/$SD_UUID" ]
+  mnt_find "$STAGING_DIR" && [ -n "$DEV_MM" ] && [ "$MI_MM" = "$DEV_MM" ] && [ -n "$SD_UUID" ] && [ -d "/storage/$SD_UUID" ] && is_sdcard_bound
 }
 
 is_internal_mounted() {
@@ -501,6 +511,7 @@ cmd_status() {
   echo "disable_data_mount=$DISABLE_DATA_MOUNT"
   echo "autofix_perms=$AUTOFIX_PERMS"
   echo "autofix_last=$(cat "$DATA_DIR/autofix.last" 2>/dev/null)"
+  echo "daemon_enabled=$DAEMON_ENABLED"
   echo "last_error=$S_ERR"
   echo "summary=$S_SUMMARY"
 }
@@ -562,6 +573,17 @@ mount_runtime_views() {
       _log "bound into view $_v"
     fi
   done
+}
+
+ensure_sdcard_bound() {
+  [ "$MOUNT_MODE" = "sdcard" ] || return 0
+  [ -n "$SD_UUID" ] || return 0
+  mnt_find "$STAGING_DIR" && [ -n "$DEV_MM" ] && [ "$MI_MM" = "$DEV_MM" ] || return 0
+  if ! is_sdcard_bound; then
+    _log "ensure_sdcard_bound: /mnt/media_rw/$SD_UUID lost bind mount; rebinding..."
+    mount --bind "$STAGING_DIR" "/mnt/media_rw/$SD_UUID" 2>/dev/null
+    mount --bind "$STAGING_DIR" "/mnt/pass_through/0/$SD_UUID" 2>/dev/null
+  fi
 }
 
 publish_tools() {
@@ -646,12 +668,12 @@ do_mount() {
     sm set-virtual-disk true >/dev/null 2>&1
     _uuid=""
     _w=0
-    while [ $_w -lt 15 ]; do
+    while [ $_w -lt 25 ]; do
       _vols=$(sm list-volumes public 2>/dev/null)
       case "$_vols" in
         *mounted*)
           _uuid=$(echo "$_vols" | sed -n 's/.*mounted \([0-9A-Fa-f-]*\).*/\1/p' | head -n 1)
-          [ -n "$_uuid" ] && break
+          [ -n "$_uuid" ] && [ -d "/storage/$_uuid" ] && [ -d "/mnt/media_rw/$_uuid" ] && break
           ;;
         *unmounted*)
           _vol=$(echo "$_vols" | awk '{print $1}')
@@ -670,6 +692,9 @@ do_mount() {
     echo "$_uuid" > "$DATA_DIR/sd_uuid"
     SD_UUID=$_uuid
     SDPATH=/storage/$SD_UUID
+
+    # Settle down before binding
+    sleep 1
 
     # 3. Mount partition onto STAGING_DIR
     _lbl=u:object_r:media_rw_data_file:s0
@@ -696,10 +721,16 @@ do_mount() {
     fi
 
     # 4. Bind mount over lower paths of vold
+    : > "$BINDS"
     mount --bind "$STAGING_DIR" "/mnt/media_rw/$SD_UUID" 2>/dev/null
     mount --bind "$STAGING_DIR" "/mnt/pass_through/0/$SD_UUID" 2>/dev/null
-    echo "/mnt/pass_through/0/$SD_UUID" >> "$BINDS"
-    echo "/mnt/media_rw/$SD_UUID" >> "$BINDS"
+    _b_retries=0
+    while ! is_sdcard_bound && [ $_b_retries -lt 5 ]; do
+      sleep 1
+      mount --bind "$STAGING_DIR" "/mnt/media_rw/$SD_UUID" 2>/dev/null
+      mount --bind "$STAGING_DIR" "/mnt/pass_through/0/$SD_UUID" 2>/dev/null
+      _b_retries=$((_b_retries + 1))
+    done
 
     # Set root permissions
     chown 1023:1023 "$STAGING_DIR" 2>/dev/null
@@ -1604,7 +1635,7 @@ cmd_diag() {
 }
 
 cmd_set() {
-  case "$1" in AUTOMOUNT|FIX_ROOT_PERMS|DISABLE_DATA_MOUNT|AUTOFIX_PERMS|MOUNT_MODE|MOUNT_NAME) ;; *) echo "unsupported key"; return 2 ;; esac
+  case "$1" in AUTOMOUNT|FIX_ROOT_PERMS|DISABLE_DATA_MOUNT|AUTOFIX_PERMS|MOUNT_MODE|MOUNT_NAME|DAEMON_ENABLED) ;; *) echo "unsupported key"; return 2 ;; esac
   case "$1" in
     MOUNT_MODE)
       case "$2" in sdcard|internal) ;; *) echo "value must be sdcard or internal"; return 2 ;; esac ;;
@@ -1616,15 +1647,30 @@ cmd_set() {
   _was_mounted=0; mounted_ours && _was_mounted=1
   conf_put "$1" "$2"
   echo "$1=$2"
-  if [ "$_was_mounted" = "1" ]; then
-    case "$1" in
-      MOUNT_MODE|MOUNT_NAME)
+  case "$1" in
+    DAEMON_ENABLED)
+      if [ "$2" = "1" ]; then
+        nohup sh "$MODDIR/ubuntu-data.sh" daemon >>"$LOG" 2>&1 &
+        say "[-] Background monitoring daemon started"
+      else
+        if [ -f "$PIDFILE" ]; then
+          _p=$(cat "$PIDFILE" 2>/dev/null)
+          [ -n "$_p" ] && kill -9 "$_p" 2>/dev/null
+          rm -f "$PIDFILE"
+        fi
+        pkill -f "ubuntu-data.sh.*daemon" 2>/dev/null || true
+        say "[-] Background monitoring daemon stopped"
+      fi
+      ;;
+    MOUNT_MODE|MOUNT_NAME)
+      if [ "$_was_mounted" = "1" ]; then
         say "[-] Mode or mount path changed; remounting..."
         do_umount 1
         load_conf
-        do_mount ;;
-    esac
-  fi
+        do_mount
+      fi
+      ;;
+  esac
   compute_status
   build_summary
   write_desc "$S_SUMMARY"
@@ -1833,7 +1879,7 @@ cmd_boot_mount() {
     [ $_i -gt 900 ] && { _log "gave up waiting for unlock"; return 13; }
     sleep 2
   done
-  sleep 3
+  sleep 5
   lock || return 1
   if [ "$DISABLE_DATA_MOUNT" = "1" ]; then
     _log "DISABLE_DATA_MOUNT=1; partition not mounted at boot"
@@ -1847,6 +1893,9 @@ cmd_boot_mount() {
     bind_mount_auto
     _r=0
   fi
+  compute_status
+  build_summary
+  write_desc "$S_SUMMARY"
   unlock
   return $_r
 }
@@ -1862,6 +1911,8 @@ write_desc() {
 }
 
 cmd_daemon() {
+  load_conf
+  [ "$DAEMON_ENABLED" = "1" ] || exit 0
   if [ -f "$PIDFILE" ]; then
     _p=$(cat "$PIDFILE" 2>/dev/null)
     if [ -n "$_p" ] && [ "$_p" != "$$" ] && kill -0 "$_p" 2>/dev/null; then
@@ -1876,6 +1927,8 @@ cmd_daemon() {
       break
     fi
     load_conf
+    [ "$DAEMON_ENABLED" = "1" ] || break
+    ensure_sdcard_bound
     compute_status
     build_summary
     write_desc "$S_SUMMARY"

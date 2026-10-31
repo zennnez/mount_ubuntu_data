@@ -137,6 +137,7 @@ This module uses standard Linux ext4 partition mounting and bind mounts (`mount 
 | `AUTOMOUNT` | `0` | mount after boot/unlock (off by default; switch it on in the WebUI) |
 | `FIX_ROOT_PERMS` | `1` | chown root of partition to media_rw, setgid |
 | `AUTOFIX_PERMS` | `0` | `1` = once after every mount (boot-mount and manual mount) fix files Android cannot use (internal mode only; disabled in External SD Card mode) |
+| `DAEMON_ENABLED` | `0` | `1` = run background monitoring daemon in External mode (auto-heal + live description updates). Default `0` = off (maximum battery savings & deep sleep) |
 | `DISABLE_DATA_MOUNT` | `0` | `1` = never mount the partition (dual boot Android + Linux option only) |
 | `EXTRA_BINDS` | empty | legacy `"src:dst ..."` bind mounts; prefer Folder mounts |
 

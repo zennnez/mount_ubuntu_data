@@ -1026,6 +1026,12 @@
             </div>
             <div class="hint" id="afxLast" style="margin-top:8px"></div>
           </div>
+          <div class="setrow">
+            <div class="row">
+              <div>Background monitoring daemon<small>Periodically checks mount state and updates live description in KernelSU manager. Off by default for maximum battery savings and deep sleep.</small></div>
+              <label class="sw"><input id="daemonSw" type="checkbox"><span></span></label>
+            </div>
+          </div>
           <button id="main" class="primary" disabled style="margin-top:14px">…</button>
         </section>
 
@@ -1222,6 +1228,8 @@
           $('afx').disabled = busy;
           $('afxLast').textContent = s.autofix_perms === '1' ? (s.autofix_last ? 'Last run: ' + s.autofix_last : 'Runs once after each mount; has not run yet.') : '';
         }
+        $('daemonSw').checked = s.daemon_enabled === '1';
+        $('daemonSw').disabled = busy;
         if (document.activeElement !== $('pName') && !pApplying) $('pName').value = s.part_name || 'data';
         $('pName').disabled = busy || pApplying;
         for (const id of ['bFsck', 'bMedia', 'bDiag', 'bLog', 'bLogDl', 'bAccess', 'bRead', 'bWrite']) $(id).disabled = busy;
@@ -1272,6 +1280,13 @@
         if (on && !(await confirmBox('Each time the partition is mounted (at boot or when you press Mount) the module will check it once and give group media_rw read/write access to files whose group or permissions Android cannot use, for example a folder extracted in Ubuntu. At boot it waits until the system has settled. Owners stay the same. Files become readable by apps with "All files access". Turn on?'))) { ev.target.checked = false; return; }
         const r = await ud('set AUTOFIX_PERMS ' + (on ? 1 : 0));
         toast(r.code === 0 ? (on ? 'Auto-fix on' : 'Auto-fix off') : 'Could not save');
+        if (r.code !== 0) ev.target.checked = !on;
+        refresh();
+      };
+      $('daemonSw').onchange = async (ev) => {
+        const on = ev.target.checked;
+        const r = await ud('set DAEMON_ENABLED ' + (on ? 1 : 0));
+        toast(r.code === 0 ? (on ? 'Monitoring daemon enabled' : 'Monitoring daemon stopped') : 'Could not save');
         if (r.code !== 0) ev.target.checked = !on;
         refresh();
       };
