@@ -101,41 +101,27 @@ Keep secrets (ssh keys, tokens) on a different folder or partition if that matte
 
 ## Folder mounts (folder A inside folder B)
 
-Mount any folder onto any other, for example a folder of the Ubuntu partition as a game's data folder.
-Manage them in the WebUI ("Folder mounts", folders are chosen with a folder picker) or in `/data/adb/mount_ubuntu_data/binds.conf`:
+Mount any folder onto any other, for example a folder of the Ubuntu partition as a game or app's data folder.
+Manage them in the WebUI ("Folder mounts", with a visual folder picker and searchable installed app picker) or in `/data/adb/mount_ubuntu_data/binds.conf`:
 
     # id    A (source)              B (destination)                         options
-    game1   @/games/mygame          Android/data/com.example.game/files    owner=auto stop=1
+    game1   @/games/mygame          Android/data/com.example.game/files    owner=auto stop=1 move=1
 
-* **A:** `@` or `@/sub/dir` is the mounted partition; otherwise an absolute path.
-* **B:** a relative path (or `/sdcard/...`) is inside internal storage. The module mounts it on the real
-  storage path *and* on the lower-filesystem views Android builds app storage from
-  (`/mnt/androidwritable/...`, `/mnt/pass_through/...`), because that is where an app's own
-  `Android/data/<package>` is bound from. An absolute path is mounted as given, anywhere except a small deny-list
-  (`/`, `/data`, `/data/adb`, `/system`, ...).
-* **Options:** `mode=bind|vfs` (default `bind`), `owner=none|auto|UID:GID`, `auto=0|1` (mount at boot),
-  `stop=0|1` (force-stop the app on mount/unmount), `pkg=<package>` (required for `mode=vfs`), `uid=N` (VFS only).
-  An old `mode=auto` line is read as `vfs` when it has `pkg=`/`uid=`, otherwise as `bind`.
-* **`owner=auto`:** for `Android/data/<pkg>` or `Android/obb/<pkg>` the app's uid is also granted write access (the top of folder A is chowned to the app; existing files stay owned by the Ubuntu user and get other-write). Folder mounts are plain bind mounts (`mount --bind`), nothing is forced. If an app cannot write, tap the status mark of the folder mount: after a permission failure it offers `bind fixwrite <id>` (group `media_rw`, group-writable, setgid). Files you copy in later from Ubuntu must stay group-accessible; use `umask 002` in Ubuntu.
-* Mount **before** starting the game, or use `stop=1`. An app that is already running keeps its old view.
-* CLI: `ubuntu-data.sh bind list | add <id> <A> <B> [opts] | del <id> | mount <id|all> | umount <id|all> [force]`.
-  Unmounting the partition unmounts all folder mounts first.
+* **A (source):** `@` or `@/sub/dir` is inside the mounted partition; otherwise an absolute path.
+* **B (destination):** a relative path (or `/sdcard/...`) is inside internal storage. The module mounts it across the primary storage path *and* the lower-filesystem namespace views Android uses for app storage (`/mnt/user/0/...`, `/mnt/androidwritable/...`, `/mnt/pass_through/...`), ensuring apps see the mounted folder seamlessly.
+* **Options:**
+  * `owner=auto|none|UID:GID` (default `auto`): for `Android/data/<pkg>` or `Android/obb/<pkg>`, ensures the app uid and media groups own and can write to the directory.
+  * `move=1` (default 0): automatically moves existing contents from destination B into source A before mounting, preventing files from being hidden or lost.
+  * `auto=1` (default 1): automatically mount at boot.
+  * `stop=1` (default 0): force-stop the target app on mount/unmount so it immediately reloads the new storage view.
+  * `pkg=<package>`: target app package name.
+* **Verification & Status:** The WebUI automatically tests read/write access as root and as Android's MediaProvider daemon (showing ✔ for working mounts, ✖ if blocked). Tapping the status icon reveals detailed diagnostics and offers one-click permission repair (`bind fixwrite <id>`).
+* **CLI:**
+  `ubuntu-data.sh bind list | add <id> <A> <B> [opts] | edit <id> <A> <B> [opts] | test <id> | fixwrite <id> | del <id> | mount <id|all> | umount <id|all> [force] | packages [filter]`
 
-## Overlayfs, Hybrid Mount and detectability
+## Mount Mechanism & Detectability
 
-This module does **not** use overlayfs. It makes a real ext4 mount of the Ubuntu partition and plain bind mounts. They
-show up in `/proc/self/mountinfo` of every process that shares the mount namespace, including apps, and
-the source is the block device. That is not the usual root-detection signature (overlay/tmpfs on system
-partitions), but it is visible.
-
-The Hybrid Mount metamodule maps *module files* onto partitions (OverlayFS, magic mount, or its VFS path
-redirect). It cannot mount a partition. Its VFS backend does redirect a path to another without any mount
-entry and can be limited to one app uid, so it is the only way here to make a game folder visible to
-that one app only. `mode=vfs` uses `hybrid-mount vfs rule add <B> <A> --uid <app uid>` when the metamodule and the kernel
-provider (`hybrid-mount vfs doctor`) are present. Treat it as **experimental**: Hybrid Mount documents
-redirecting files and `--opaque` directories, and does not document redirecting a whole directory, so check that the
-game actually sees the data. `mode=vfs` never falls back to a bind mount.
-VFS rules are runtime-only: the module re-applies them on every boot (and waits up to 30 s for the provider to come up).
+This module uses standard Linux ext4 partition mounting and bind mounts (`mount --bind`) alongside dynamically applied SELinux MLS trust rules (`sepolicy.rule`). It does not use OverlayFS or external redirection hooks. All mounts appear cleanly in `/proc/self/mountinfo` from the underlying block device without modifying Android system partitions.
 
 ## Config: `/data/adb/mount_ubuntu_data/config.sh`
 
@@ -162,12 +148,3 @@ VFS rules are runtime-only: the module re-applies them on every boot (and waits 
 ## Support
 
 Questions, bugs, ideas: Telegram **https://t.me/kokernel** (also linked in the WebUI).
-
-## Dual boot option: disable the partition mount
-
-WebUI switch **Disable /data partition mount** (config key `DISABLE_DATA_MOUNT`, default `0` = off, the partition is mounted
-as before). This option is for **dual boot Android + Linux**, to mount the additional `sdaX` partition in both systems.
-**Do not use it if you do not dual boot.** When on, the module never mounts the partition (boot, Action button, WebUI
-Mount button); folder mounts whose source is an absolute path keep working. Turning it on unmounts the partition first.
-CLI: `ubuntu-data.sh set DISABLE_DATA_MOUNT 1|0`.
-
