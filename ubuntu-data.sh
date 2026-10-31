@@ -16,8 +16,8 @@
 #                     and is ext4; set tests, saves, unmounts the old one and mounts the new one
 #   browse <dir>      list sub-folders of an absolute path (WebUI folder picker)
 #   mkdir <dir>       create a folder inside the partition or internal storage (folder picker)
-#   bind list|add|del|mount|umount|vfs-check|vfs-test   folder A -> folder B mounts (binds.conf)
-#   packages [filter] list installed apps (pkg= uid=) for the VFS picker
+#   bind list|add|del|mount|umount                      folder A -> folder B mounts (binds.conf)
+#   packages [filter] list installed apps (pkg= uid=) for app folder picker
 #   layout            show which block device the partition name resolves to
 #   access            test what the Android media daemon (gid media_rw) can read/write
 #   fixperms read|rw [folder]
@@ -470,7 +470,6 @@ cmd_status() {
   echo "autofix_perms=$AUTOFIX_PERMS"
   echo "autofix_last=$(cat "$DATA_DIR/autofix.last" 2>/dev/null)"
   echo "last_error=$S_ERR"
-  if vfs_ready_cached; then echo "vfs_available=1"; else echo "vfs_available=0"; fi
   echo "summary=$S_SUMMARY"
 }
 
@@ -712,16 +711,12 @@ do_umount() {
 
 # ------------------------------------------------------------------------------
 # Folder mounts: folder A (on the partition or anywhere) -> folder B (anywhere)
-#   binds.conf line:  <id> <source A> <destination B> [mode=bind|vfs] [owner=none|auto|UID:GID]
-#                     [auto=0|1] [pkg=name] [uid=N] [stop=0|1]
+#   binds.conf line:  <id> <source A> <destination B> [owner=none|auto|UID:GID]
+#                     [auto=0|1] [pkg=name] [uid=N] [stop=0|1] [move=0|1]
 #   source: "@" / "@/sub" = the mounted partition, or an absolute path
 #   destination: relative = inside internal storage (/sdcard/<dst>), or absolute "anywhere"
-#   mode=bind : real bind mount, visible to every app
-#   mode=vfs  : Hybrid Mount VFS redirect for one app uid only (no mount entry). pkg= is required.
-#               Old mode=auto is read as vfs when pkg= or uid= is set, otherwise as bind.
 # ------------------------------------------------------------------------------
 BINDCONF=$DATA_DIR/binds.conf
-HM=/data/adb/modules/hybrid_mount/hybrid-mount
 VIEW_ROOTS="/storage/emulated/0 /mnt/user/0/emulated/0 /mnt/installer/0/emulated/0 /mnt/androidwritable/0/emulated/0 /mnt/pass_through/0/emulated/0 /mnt/runtime/default/emulated/0 /mnt/runtime/read/emulated/0 /mnt/runtime/write/emulated/0"
 DST_DENY="/ /data /data/media /data/media/0 /data/adb /data/adb/modules /storage /system /vendor /product /system_ext /odm /proc /sys /dev /apex /mnt /sdcard"
 
@@ -731,11 +726,9 @@ init_bindconf() {
 # Folder mounts. One per line:  id  source(A)  destination(B)  [options]
 #   source      "@" or "@/sub/dir" = the mounted partition, or an absolute path
 #   destination relative path = inside internal storage (/sdcard/<path>), or an absolute path
-#   options     mode=bind|vfs   owner=none|auto|UID:GID   auto=0|1   pkg=name   stop=0|1   move=0|1
+#   options     owner=none|auto|UID:GID   auto=0|1   pkg=name   stop=0|1   move=0|1
 #   move=1 moves what is already in folder B into folder A before mounting (nothing is hidden or lost)
-#   mode=vfs redirects folder B to folder A for that one app (Hybrid Mount). Example:
-#   game1  @/games/mygame  Android/data/com.example.game/files  mode=vfs pkg=com.example.game stop=1
-# Bind mount example (every app sees it):
+# Bind mount example:
 #   game1  @/games/mygame  Android/data/com.example.game/files  owner=auto stop=1
 EOT
   chmod 0600 "$BINDCONF"
@@ -775,7 +768,7 @@ entry_parse() {
   E_MODE=bind; E_OWNER=none; E_AUTO=1; E_UID=""; E_STOP=0; E_PKG_OPT=""; E_MOVE=0
   for _o in $E_OPTS; do
     case "$_o" in
-      mode=*)  E_MODE=${_o#mode=} ;;
+      mode=*)  ;;
       owner=*) E_OWNER=${_o#owner=} ;;
       auto=*)  E_AUTO=${_o#auto=} ;;
       uid=*)   E_UID=${_o#uid=} ;;
@@ -806,11 +799,6 @@ entry_parse() {
       E_PKG=${_p%%/*} ;;
   esac
   [ -n "$E_PKG_OPT" ] && E_PKG=$E_PKG_OPT
-  # mode=auto used to mean "VFS if present, else a global bind". That hid which
-  # apps could see the folder. Keep old lines working: vfs only when an app was named.
-  if [ "$E_MODE" = "auto" ]; then
-    if [ -n "$E_PKG_OPT" ] || [ -n "$E_UID" ]; then E_MODE=vfs; else E_MODE=bind; fi
-  fi
 }
 
 entry_dsts() {
@@ -823,7 +811,6 @@ entry_dsts() {
 }
 
 entry_statefile() { echo "$DATA_DIR/bind.$1"; }
-boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
 
 entry_state() { # <id> -> mounted|unmounted
   _sf=$(entry_statefile "$1")
@@ -831,8 +818,6 @@ entry_state() { # <id> -> mounted|unmounted
   read -r _k _v _rest < "$_sf"
   case "$_k" in
     M) if mnt_find "$_v"; then echo mounted; else echo unmounted; fi ;;
-    V) # VFS rules are runtime-only: a state file from an earlier boot is stale
-       if [ "$(cat "$_sf.boot" 2>/dev/null)" = "$(boot_id)" ]; then echo mounted; else echo unmounted; fi ;;
     *) echo unmounted ;;
   esac
 }
@@ -940,8 +925,6 @@ entry_mount() { # <id> <ctx: manual|auto>
   entry_get "$1" || { say "[!] no folder mount named '$1'"; return 1; }
   [ "$(entry_state "$1")" = "mounted" ] && { say "[=] $E_ID already mounted"; return 0; }
 
-  case "$E_MODE" in bind|vfs) ;; *) say "[!] $E_ID: bad mode '$E_MODE'"; return 1 ;; esac
-
   case "$E_SRC" in
     @|@/*)
       if ! mounted_ours; then
@@ -967,186 +950,27 @@ entry_mount() { # <id> <ctx: manual|auto>
     case "$_d/" in "$E_SRCP"/*) say "[!] $E_ID: destination is inside the source"; return 11 ;; esac
   done
 
-  [ "$E_MODE" = "bind" ] && entry_sweep 1
+  entry_sweep 1
   entry_move_in || return $?
   entry_apply_owner
 
   _sf=$(entry_statefile "$E_ID")
   : > "$_sf"
-  _done=0
-  _m=$E_MODE
-  if [ "$_m" = "vfs" ] || [ "$_m" = "auto" ]; then
-    if entry_vfs_add; then _done=1; elif [ "$_m" = "vfs" ]; then
-      say "[!] $E_ID: VFS backend failed (mode=vfs does not fall back to a real mount)"
-      rm -f "$_sf"; return 3
+  _first=1
+  for _d in $_dsts; do
+    if mnt_find "$_d" && [ $_first -eq 0 ]; then _first=0; continue; fi
+    _first=0
+    mkdir -p "$_d" 2>/dev/null
+    if _e=$(mount --bind "$E_SRCP" "$_d" 2>&1); then
+      echo "M $_d" >> "$_sf"
+      say "[+] $E_ID: $E_SRCP -> $_d"
     else
-      say "[~] $E_ID: VFS unavailable, using bind mount"
-    fi
-  fi
-  if [ $_done -eq 0 ]; then
-    _first=1
-    for _d in $_dsts; do
-      if mnt_find "$_d" && [ $_first -eq 0 ]; then _first=0; continue; fi
-      _first=0
-      mkdir -p "$_d" 2>/dev/null
-      if _e=$(mount --bind "$E_SRCP" "$_d" 2>&1); then
-        echo "M $_d" >> "$_sf"
-        say "[+] $E_ID: $E_SRCP -> $_d"
-      else
-        say "[!] $E_ID: bind to $_d failed: $_e"
-      fi
-    done
-    if [ ! -s "$_sf" ]; then rm -f "$_sf"; say "[!] $E_ID: nothing could be mounted"; return 3; fi
-  fi
-  [ "$E_STOP" = "1" ] && [ -n "$E_PKG" ] && am force-stop "$E_PKG" 2>/dev/null
-  return 0
-}
-
-# Hybrid Mount VFS: redirect the path an app opens onto folder A, for that app's uid only.
-# `hybrid-mount vfs rule add <virtual> <real> --uid UID`. UID 0 means every process, so it is refused.
-# Rules are runtime-only; boot-mount reapplies them. doctor may exit 0 when the provider is down,
-# so availability is checked via "responds": true in `vfs doctor --json`.
-vfs_ready_cached() { # status is polled every few seconds; do not run doctor each time
-  [ -x "$HM" ] || return 1
-  _vc=$DATA_DIR/.vfs_cache
-  _vn=$(date +%s); _vt=$(stat -c %Y "$_vc" 2>/dev/null || echo 0)
-  if [ -s "$_vc" ] && [ $((_vn - _vt)) -lt 30 ]; then
-    [ "$(cat "$_vc")" = "1" ]
-    return
-  fi
-  if vfs_ready; then echo 1 > "$_vc"; return 0; fi
-  echo 0 > "$_vc"
-  return 1
-}
-
-vfs_ready() {
-  VFS_MSG=""
-  [ -x "$HM" ] || { VFS_MSG="Hybrid Mount is not installed"; return 1; }
-  _vr=$("$HM" vfs doctor --json 2>/dev/null)
-  if [ -n "$_vr" ] && echo "$_vr" | grep -q '"responds"'; then
-    if echo "$_vr" | grep -Eq '"responds"[[:space:]]*:[[:space:]]*true'; then
-      VFS_MSG="Hybrid Mount VFS provider is responding"
-      return 0
-    fi
-    VFS_MSG="Hybrid Mount VFS provider is not responding"
-    return 1
-  fi
-  _vr=$("$HM" vfs doctor 2>&1)
-  if [ $? -ne 0 ]; then
-    VFS_MSG=${_vr:-"vfs doctor failed"}
-    return 1
-  fi
-  if echo "$_vr" | grep -Eiq 'unavailable|not available|no provider'; then
-    VFS_MSG="Hybrid Mount VFS provider is not available"
-    return 1
-  fi
-  VFS_MSG="Hybrid Mount VFS provider is responding"
-  return 0
-}
-
-# Paths the selected app actually opens. Not the vold runtime/read views.
-vfs_virtual_paths() {
-  if [ -n "$E_REL" ]; then
-    echo "/storage/emulated/0/$E_REL"
-    echo "/mnt/user/0/emulated/0/$E_REL"
-    case "$E_REL" in
-      Android/data/*|Android/obb/*)
-        echo "/mnt/androidwritable/0/emulated/0/$E_REL" ;;
-    esac
-  else
-    echo "$E_DST"
-  fi
-}
-
-entry_vfs_uid() {
-  if [ -n "$E_PKG" ]; then
-    _u=$(pkg_uid "$E_PKG")
-    if [ -n "$_u" ] && [ "$_u" != "0" ]; then
-      echo "$_u"
-      return 0
-    fi
-  fi
-  case "$E_UID" in
-    ""|0|*[!0-9]*) return 1 ;;
-    *) echo "$E_UID"; return 0 ;;
-  esac
-}
-
-entry_vfs_add() {
-  _vu=$(entry_vfs_uid) || {
-    say "[!] $E_ID: VFS needs an installed app. Set pkg=<package.name> (UID 0 would redirect every process)."
-    return 1
-  }
-  # at boot the Hybrid Mount provider can come up later than this script
-  if [ -n "$UD_BOOT" ] && [ -x "$HM" ]; then
-    _w=0
-    while ! vfs_ready && [ "$_w" -lt 15 ]; do sleep 2; _w=$((_w + 1)); done
-  fi
-  vfs_ready || { say "[!] $E_ID: $VFS_MSG"; return 1; }
-  _ok=0
-  for _d in $(vfs_virtual_paths); do
-    for _x in $DST_DENY; do
-      [ "$_d" = "$_x" ] && { say "[!] $E_ID: refusing VFS path $_d"; return 11; }
-    done
-    _r=$("$HM" vfs rule add "$_d" "$E_SRCP" --uid "$_vu" 2>&1)
-    if [ $? -eq 0 ]; then
-      echo "V $_d $_vu" >> "$_sf"
-      _ok=1
-      say "[+] $E_ID: vfs $E_SRCP => $_d (uid $_vu${E_PKG:+, $E_PKG})"
-    else
-      _log "$E_ID: vfs rule for $_d failed: $_r"
-      say "[!] $E_ID: vfs $_d failed: $_r"
+      say "[!] $E_ID: bind to $_d failed: $_e"
     fi
   done
-  [ "$_ok" -eq 1 ] && boot_id > "$_sf.boot"
-  [ "$_ok" -eq 1 ]
-}
-
-entry_test_vfs() {
-  _vp=$(vfs_virtual_paths | head -n 1)
-  _vu=$(entry_vfs_uid)
-  _tn=.ud_rw_test_$$
-  _st=ok
-  _msg="The selected app can read and write folder A through folder B"
-  _det=""
-  _add() { _det="$_det
-detail=$*"; }
-  _add "folder A : $(ls -dnZ "$E_SRCP" 2>/dev/null || ls -dn "$E_SRCP" 2>/dev/null)"
-  _add "app path : $_vp"
-  _add "package  : ${E_PKG:-"(uid only)"} uid ${_vu:-unknown}"
-  if [ -z "$_vu" ]; then
-    echo "status=fail"
-    echo "msg=No app uid (package not installed?)"
-    echo "$_det" | sed '/^$/d'
-    return 1
-  fi
-  rm -rf "$E_SRCP/$_tn" "$E_SRCP/$_tn.d" "$_vp/$_tn" "$_vp/$_tn.d" 2>/dev/null
-  _g=1078
-  [ "$E_KIND" = "obb" ] && _g=1079
-  run_as "$_vu" "$_g" "mkdir '$_vp/$_tn.d' && echo ok > '$_vp/$_tn' && [ \"\$(cat '$_vp/$_tn')\" = ok ]" >/dev/null 2>&1
-  _r=$?
-  if [ "$_r" -eq 99 ]; then
-    _st=warn
-    _msg="VFS rule is installed, but this shell cannot switch to uid $_vu to test it"
-    _add "test     : no setpriv/su uid support"
-  elif [ -f "$E_SRCP/$_tn" ] && [ "$(cat "$E_SRCP/$_tn" 2>/dev/null)" = "ok" ]; then
-    _add "app uid $_vu: write on $_vp landed in folder A"
-  elif [ -e "$_vp/$_tn" ] || [ -d "$_vp/$_tn.d" ]; then
-    _st=fail
-    _msg="The app wrote the original folder B. The VFS rule did not redirect this uid."
-    _add "app uid $_vu: file appeared on $_vp, not in $E_SRCP"
-  elif [ "$_r" -ne 0 ]; then
-    _st=fail
-    _msg="App uid $_vu could not write. Check that the app is installed and folder A is writable by it."
-    _add "app uid $_vu: create on $_vp failed"
-  else
-    _st=warn
-    _msg="Write returned success but the test file was not found in folder A"
-  fi
-  rm -rf "$E_SRCP/$_tn" "$E_SRCP/$_tn.d" "$_vp/$_tn" "$_vp/$_tn.d" 2>/dev/null
-  echo "status=$_st"
-  echo "msg=$_msg"
-  echo "$_det" | sed '/^$/d'
+  if [ ! -s "$_sf" ]; then rm -f "$_sf"; say "[!] $E_ID: nothing could be mounted"; return 3; fi
+  [ "$E_STOP" = "1" ] && [ -n "$E_PKG" ] && am force-stop "$E_PKG" 2>/dev/null
+  return 0
 }
 
 # entry_sweep <force 0|1>: unmount every mount still sitting at folder B or its Android views that comes from the
@@ -1177,13 +1001,11 @@ entry_umount() { # <id> <force>
     _k=${_line%%|*}; _rest=${_line#*|}
     case "$_k" in
       M) umount_one "$_rest" "$2" || { _bad=1; say "[!] busy: $_rest"; } ;;
-      V) _vp=${_rest%|*}; _vu=${_rest##*|}
-         if [ "$_vu" != "0" ]; then "$HM" vfs rule del "$_vp" --uid "$_vu" >/dev/null 2>&1; else "$HM" vfs rule del "$_vp" >/dev/null 2>&1; fi ;;
     esac
   done
   if [ $_bad -eq 0 ]; then
     entry_sweep "$2"
-    rm -f "$_sf" "$_sf.boot"
+    rm -f "$_sf"
     say "[+] $1 unmounted"
     [ "$E_STOP" = "1" ] && [ -n "$E_PKG" ] && am force-stop "$E_PKG" 2>/dev/null
     return 0
@@ -1292,7 +1114,6 @@ entry_fixwrite() {
 entry_test() {
   entry_get "$1" || { echo "status=off"; echo "msg=no such folder mount"; return 1; }
   if [ "$(entry_state "$E_ID")" != "mounted" ]; then echo "status=off"; echo "msg=Not mounted"; return 0; fi
-  [ "$E_MODE" = "vfs" ] && { entry_test_vfs; return; }
   _dst=$(entry_dsts | head -n 1)
   _tn=.ud_rw_test_$$
   _st=ok; _msg="Read and write work (as root and as the Android media daemon)"
@@ -1332,7 +1153,7 @@ detail=$*"; }
     _appdone=1
     _muid=$(media_uid)
     rm -rf "$_dst/$_tn.d" "$_dst/$_tn" 2>/dev/null
-    RA_GROUPS=1023,1078,1079
+    RA_GROUPS="1023,1078,1079,9997"
     _o=$(run_as "$_muid" 1023 "id; mkdir '$_dst/$_tn.d' && echo ok > '$_dst/$_tn' && [ \"\$(cat '$_dst/$_tn')\" = ok ]" 2>&1)
     _r=$?
     RA_GROUPS=""
@@ -1354,8 +1175,10 @@ detail=$*"; }
   if [ "$_rootok" = 1 ] && [ "$_appdone" = 0 ]; then
     _muid=$(pkg_uid com.google.android.providers.media.module); [ -z "$_muid" ] && _muid=$(pkg_uid com.android.providers.media.module); [ -z "$_muid" ] && _muid=10234
     rm -rf "$_dst/$_tn.d" "$_dst/$_tn" 2>/dev/null
+    RA_GROUPS="1023,1078,1079,9997"
     run_as "$_muid" 1023 "mkdir '$_dst/$_tn.d' && echo ok > '$_dst/$_tn' && [ \"\$(cat '$_dst/$_tn')\" = ok ]" >/dev/null 2>&1
     _r=$?
+    RA_GROUPS=""
     if [ $_r -eq 99 ]; then
       _st=warn; _msg="Root works; could not test as the media daemon (no setpriv/su uid support)"
     elif [ $_r -ne 0 ]; then
@@ -1450,11 +1273,6 @@ cmd_bind() {
     test)
       valid_id "$1" || { echo "status=off"; echo "msg=bad id"; return 2; }
       entry_test "$1" ;;
-    vfs-test)
-      valid_id "$1" || { echo "status=off"; echo "msg=bad id"; return 2; }
-      entry_get "$1" || { echo "status=off"; echo "msg=no such folder mount"; return 1; }
-      if [ "$(entry_state "$1")" != "mounted" ]; then echo "status=off"; echo "msg=Not mounted"; return 0; fi
-      entry_test_vfs ;;
     fixwrite)
       valid_id "$1" || { echo "bad id"; return 2; }
       lock || return 1
@@ -1476,11 +1294,6 @@ cmd_bind() {
       lock || return 1
       if [ "$1" = "all" ]; then each_entry entry_umount "$_f"; else valid_id "$1" && entry_umount "$1" "$_f"; fi
       _r=$?; unlock; return $_r ;;
-    vfs-check)
-      # `vfs doctor` can exit 0 while the provider is down, so use vfs_ready
-      vfs_ready; _r=$?
-      echo "$VFS_MSG"
-      return $_r ;;
     packages)
       # list installed packages with their app label and uid
       _filt=${1:-""}
@@ -1496,7 +1309,7 @@ cmd_bind() {
           echo "pkg=$_pkg|name=$_pkg|uid=${_uid:-?}"
         done
       fi ;;
-    *) echo "usage: bind list | add|edit <id> <src> <dst> [opts] | test <id> | vfs-test <id> | fixwrite <id> | del <id> | mount <id|all> | umount <id|all> [force] | vfs-check | packages [filter]"; return 2 ;;
+    *) echo "usage: bind list | add|edit <id> <src> <dst> [opts] | test <id> | fixwrite <id> | del <id> | mount <id|all> | umount <id|all> [force] | packages [filter]"; return 2 ;;
   esac
 }
 
@@ -1776,7 +1589,6 @@ cmd_diag() {
   echo "== superblock =="; echo "luks=$(rd 6 0) ext4magic=$(rd 2 540) f2fs=$(rd 4 256) incompat=$(rd 4 280)"
   command -v blkid >/dev/null 2>&1 && blkid "$DEV_REAL" 2>&1
   echo "== android =="; echo "boot_completed=$(getprop sys.boot_completed) ce_available=$(getprop sys.user.0.ce_available) selinux=$(getenforce 2>/dev/null)"
-  echo "== hybrid mount vfs =="; if vfs_ready; then echo "$VFS_MSG"; else echo "unavailable: $VFS_MSG"; fi
   echo "== mounts =="; grep -E "$DEV_BASE| $TARGET " /proc/self/mountinfo 2>/dev/null
   echo "== target =="; ls -ldZ "$TARGET" 2>&1; ls -A "$TARGET" 2>&1 | head -n 10
   echo "== android view =="; echo "view=$(android_view)"; ls -ldZ /storage/emulated/0/$MOUNT_NAME 2>&1
