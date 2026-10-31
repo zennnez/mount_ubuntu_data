@@ -14,7 +14,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SKIP_NAMES = {'pack.py', '.gitattributes', '.gitignore', '.editorconfig', '.DS_Store', 'Thumbs.db'}
 SKIP_DIRS = {'.git', '.github', '__pycache__'}
 EXEC = {'update-binary', 'action.sh', 'customize.sh', 'service.sh', 'uninstall.sh', 'ubuntu-data.sh', 'setup-sharing.sh'}
-BINARY_EXT = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.woff', '.woff2', '.ttf', '.zip'}
+BINARY_EXT = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.woff', '.woff2', '.ttf', '.zip', '.dex'}
 
 def files():
     for d, dirs, names in os.walk(ROOT):
