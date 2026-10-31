@@ -127,8 +127,8 @@ for u in $USERS; do
 done
 TARGET_USER=$(echo "$USERS" | awk '{print $1}')
 
-# 3. share root and every folder between it and the repaired folder: traversable by the group
-chgrp "$GNAME" "$MP" && chmod 2775 "$MP" || echo "[!] could not set group/mode on $MP" >&2
+# 3. share root and every folder between it and the repaired folder: traversable by the group and other
+chgrp "$GNAME" "$MP" && chmod 2777 "$MP" || echo "[!] could not set group/mode on $MP" >&2
 if [ "$SCOPE" != "$MP" ]; then
   _acc=$MP
   _oldifs=$IFS; IFS=/; set -- ${SCOPE#"$MP"}; IFS=$_oldifs
@@ -136,16 +136,16 @@ if [ "$SCOPE" != "$MP" ]; then
     [ -n "$_seg" ] || continue
     _acc=$_acc/$_seg
     [ "$_acc" = "$SCOPE" ] && break
-    chgrp "$GNAME" "$_acc" 2>>"$ERR" && chmod g+rwx,g+s "$_acc" 2>>"$ERR" || true
+    chgrp "$GNAME" "$_acc" 2>>"$ERR" && chmod 2777 "$_acc" 2>>"$ERR" || true
   done
 fi
 
-# 4. group + permissions on everything below the scope (owners and 'other' bits are left alone)
-echo "[-] setting group $GNAME and g+rwX on $SCOPE (can take a while on big trees)..."
+# 4. group + permissions on everything below the scope (fully readable/writable by Android and Ubuntu)
+echo "[-] setting group $GNAME and a+rwX on $SCOPE (can take a while on big trees)..."
 find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o ! -type l -exec chgrp "$GNAME" {} + 2>>"$ERR" || true
-find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o ! -type l -exec chmod g+rwX {} + 2>>"$ERR" || true
-find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o -type d -exec chmod g+s {} + 2>>"$ERR" || true
-echo "[+] $SCOPE is now group $GNAME, setgid folders, group rwX (owners unchanged)"
+find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o ! -type l -exec chmod a+rwX {} + 2>>"$ERR" || true
+find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o -type d -exec chmod 2777 {} + 2>>"$ERR" || true
+echo "[+] $SCOPE is now group $GNAME, mode 2777 folders, a+rwX"
 
 # 5. ACLs (also repairs the ACL mask that tar -x as root sets to '---')
 if [ "$ACL" -eq 1 ]; then
@@ -154,8 +154,8 @@ if [ "$ACL" -eq 1 ]; then
     if command -v apt-get >/dev/null 2>&1; then apt-get install -y acl >/dev/null; else echo "[!] install 'acl' manually, then rerun" >&2; exit 1; fi
   fi
   echo "[-] applying ACLs (this can take a while on big trees)..."
-  find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o ! -type l -exec setfacl -m "${TARGET_USER:+u:$TARGET_USER:rwX,}g:$GID:rwX,m::rwx" {} + 2>>"$ERR" || true
-  find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o -type d -exec setfacl -m "${TARGET_USER:+d:u:$TARGET_USER:rwX,}d:g:$GID:rwX,d:m::rwx" {} + 2>>"$ERR" || true
+  find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o ! -type l -exec setfacl -m "${TARGET_USER:+u:$TARGET_USER:rwX,}g:$GID:rwX,o::rwx,m::rwx" {} + 2>>"$ERR" || true
+  find "$SCOPE" -xdev -path "$MP/lost+found" -prune -o -type d -exec setfacl -m "${TARGET_USER:+d:u:$TARGET_USER:rwX,}d:g:$GID:rwX,d:o::rwx,d:m::rwx" {} + 2>>"$ERR" || true
   echo "[+] ACLs set: group $GID${TARGET_USER:+ and user $TARGET_USER} have rwX on existing files; new files inherit it"
 fi
 
