@@ -544,8 +544,21 @@ publish_tools() {
   fi
 }
 
+apply_sepolicy() {
+  _r="$MODDIR/sepolicy.rule"
+  [ -f "$_r" ] || return 0
+  if [ -x /data/adb/ksu/bin/ksud ]; then
+    /data/adb/ksu/bin/ksud sepolicy apply "$_r" >/dev/null 2>&1
+  elif command -v magiskpolicy >/dev/null 2>&1; then
+    magiskpolicy --live --apply "$_r" >/dev/null 2>&1
+  elif command -v supolicy >/dev/null 2>&1; then
+    supolicy --live --apply "$_r" >/dev/null 2>&1
+  fi
+}
+
 do_mount() {
   load_conf
+  apply_sepolicy
   if mounted_ours; then
     say "[=] Already mounted at $TARGET"
     return 0
@@ -923,6 +936,7 @@ app_identity() {
 }
 
 entry_mount() { # <id> <ctx: manual|auto>
+  apply_sepolicy
   entry_get "$1" || { say "[!] no folder mount named '$1'"; return 1; }
   [ "$(entry_state "$1")" = "mounted" ] && { say "[=] $E_ID already mounted"; return 0; }
 
@@ -1235,9 +1249,11 @@ bind_edit() {
   _be_new="$_be_id $_be_s $_be_d $*"
   entry_get "$_be_id" || { echo "no folder mount named '$_be_id'"; return 1; }
   _be_was=$(entry_state "$_be_id")
-  if [ "$_be_was" = "mounted" ]; then
-    entry_umount "$_be_id" 0 >/dev/null 2>&1 || { echo "'$_be_id' is in use; unmount it (or force) before editing"; return 5; }
-  fi
+  _old_dsts=$(entry_dsts)
+  entry_umount "$_be_id" 1 >/dev/null 2>&1
+  for _od in $_old_dsts; do
+    umount "$_od" 2>/dev/null || umount -l "$_od" 2>/dev/null
+  done
   : > "$BINDCONF.tmp"
   set -f
   while IFS= read -r _l; do
@@ -1466,16 +1482,20 @@ cmd_bind() {
       echo "$VFS_MSG"
       return $_r ;;
     packages)
-      # list installed packages with their uid (for the VFS picker)
+      # list installed packages with their app label and uid
       _filt=${1:-""}
-      pm list packages -U 2>/dev/null | { if [ -n "$_filt" ]; then grep -iF -- "$_filt"; else cat; fi; } | while IFS= read -r _line; do
-        case "$_line" in package:*) ;; *) continue ;; esac
-        _pkg=${_line#package:}; _pkg=${_pkg%% *}
-        _uid=""
-        case "$_line" in *" uid:"*) _uid=${_line##* uid:}; _uid=${_uid%% *} ;; esac
-        [ -n "$_uid" ] || _uid=$(pkg_uid "$_pkg")
-        echo "pkg=$_pkg|uid=${_uid:-?}"
-      done ;;
+      if [ -f "$MODDIR/listapps.dex" ]; then
+        CLASSPATH="$MODDIR/listapps.dex" app_process /system/bin com.zen.mountdata.ListApps 2>/dev/null | { if [ -n "$_filt" ]; then grep -iF -- "$_filt"; else cat; fi; }
+      else
+        pm list packages -U 2>/dev/null | { if [ -n "$_filt" ]; then grep -iF -- "$_filt"; else cat; fi; } | while IFS= read -r _line; do
+          case "$_line" in package:*) ;; *) continue ;; esac
+          _pkg=${_line#package:}; _pkg=${_pkg%% *}
+          _uid=""
+          case "$_line" in *" uid:"*) _uid=${_line##* uid:}; _uid=${_uid%% *} ;; esac
+          [ -n "$_uid" ] || _uid=$(pkg_uid "$_pkg")
+          echo "pkg=$_pkg|name=$_pkg|uid=${_uid:-?}"
+        done
+      fi ;;
     *) echo "usage: bind list | add|edit <id> <src> <dst> [opts] | test <id> | vfs-test <id> | fixwrite <id> | del <id> | mount <id|all> | umount <id|all> [force] | vfs-check | packages [filter]"; return 2 ;;
   esac
 }
@@ -1915,6 +1935,7 @@ cmd_partition() {
 # ------------------------------------------------------------------------------
 cmd_boot_mount() {
   load_conf
+  apply_sepolicy
   UD_BOOT=1; export UD_BOOT
   _log "=== boot-mount === DEV=$DEV_REAL boot_completed=$(getprop sys.boot_completed) ce=$(getprop sys.user.0.ce_available) sd_base_exists=$([ -d "$SD_BASE" ] && echo yes || echo no)"
   _i=0

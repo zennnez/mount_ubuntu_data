@@ -10,12 +10,20 @@ allow mediaprovider_app unlabeled file *
 allow mediaprovider_app media_rw_data_file dir *
 allow mediaprovider_app media_rw_data_file file *
 
+# Allow all apps direct access to mounted ext4 files / folders
 allow appdomain media_rw_data_file dir *
 allow appdomain media_rw_data_file file *
+allow appdomain media_rw_data_file lnk_file *
 allow untrusted_app_all media_rw_data_file dir *
 allow untrusted_app_all media_rw_data_file file *
+allow untrusted_app_all media_rw_data_file lnk_file *
 allow priv_app media_rw_data_file dir *
 allow priv_app media_rw_data_file file *
+allow priv_app media_rw_data_file lnk_file *
+
+# Allow all app categories (MLS) to write into mounted folders without restriction
+typeattribute media_rw_data_file mlstrustedobject
+typeattribute unlabeled mlstrustedobject
 
 # Allow sdcardd / fuse to associate unlabeled files on filesystem
 allow fuse unlabeled filesystem *

@@ -474,6 +474,55 @@
       color: var(--muted);
     }
 
+    .pkg-picker-wrap {
+      position: relative;
+    }
+
+    .pkg-dropdown {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      max-height: 196px; /* precisely ~4 items with scroll */
+      overflow-y: auto;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      z-index: 100;
+      margin-top: 4px;
+    }
+
+    .pkg-item {
+      padding: 9px 12px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+    }
+
+    .pkg-item:last-child {
+      border-bottom: none;
+    }
+
+    .pkg-item:hover,
+    .pkg-item.active {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .pkg-item-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .pkg-item-pkg {
+      font-size: 11px;
+      color: var(--muted);
+      font-family: monospace;
+    }
+
     .form input[type=text],
     .form select {
       font: inherit;
@@ -954,10 +1003,14 @@
           <details id="addbox">
             <summary id="addSum">Add folder mount</summary>
             <div class="form">
-              <label id="fPkgRow">App Package (optional: select an app to auto-fill)
-                <input id="fPkg" type="text" list="pkgList" placeholder="e.g. com.example.game" maxlength="120"
-                  autocapitalize="off" autocomplete="off" spellcheck="false">
-                <datalist id="pkgList"></datalist></label>
+              <div id="fPkgRow">
+                <div class="lbl">App Package (optional: select an app to auto-fill)</div>
+                <div class="pkg-picker-wrap">
+                  <input id="fPkg" type="text" placeholder="Search app name or package (e.g. Solid Explorer)..." maxlength="120"
+                    autocapitalize="off" autocomplete="off" spellcheck="false">
+                  <div id="pkgDropdown" class="pkg-dropdown hidden"></div>
+                </div>
+              </div>
               <label>Name<input id="fId" type="text" placeholder="game1" autocapitalize="off"
                   autocomplete="off"></label>
               <div>
@@ -977,7 +1030,7 @@
                   <option value="bind">Bind mount (real mount, works everywhere)</option>
                   <option value="vfs">Hybrid Mount VFS redirect (one app only, experimental)</option>
                 </select></label>
-              <label class="chk"><input id="fOwner" type="checkbox"><span>Let the target app read and write folder A
+              <label class="chk"><input id="fOwner" type="checkbox" checked><span>Let the target app read and write folder A
                   <small>Turn this on when folder B is an app's own folder (<code>Android/data/&lt;package&gt;</code> or <code>Android/obb/&lt;package&gt;</code>): the top of folder A is handed to that app (chown, mode 2770). Nothing else is changed.</small></span></label>
               <label id="fMoveRow" class="chk"><input id="fMove" type="checkbox"><span>Move existing files from folder B into folder A
                   <small>On mount, whatever already sits in folder B is moved onto the Ubuntu side first, so mounting does not hide it. Names that already exist in folder A stay in B.</small></span></label>
@@ -1186,16 +1239,72 @@
       let editing = null;   // id of the folder mount being edited, or null when adding
       const pkgFromDst = (d) => { const m = /(?:^|\/)Android\/(?:data|obb)\/([A-Za-z0-9_.]+)/.exec(d || ''); return m ? m[1] : ''; };
       const PKG_RE = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$/;
+      let pkgsList = [];
       let pkgsLoaded = false;
       async function loadPkgs() {
-        if (pkgsLoaded) return; pkgsLoaded = true;
+        if (pkgsLoaded) return;
         const r = await ud('packages');
-        const dl = $('pkgList'); dl.textContent = '';
+        if (r.code !== 0) return;
+        pkgsLoaded = true;
+        pkgsList = [];
         r.out.split('\n').forEach((l) => {
-          const m = /^pkg=([^|]+)\|uid=/.exec(l); if (!m) return;
-          const o = document.createElement('option'); o.value = m[1]; dl.appendChild(o);
+          const m = /^pkg=([^|]+)\|name=([^|]*)\|uid=/.exec(l);
+          if (m) {
+            pkgsList.push({ pkg: m[1], name: m[2] || m[1] });
+          } else {
+            const m2 = /^pkg=([^|]+)\|uid=/.exec(l);
+            if (m2) pkgsList.push({ pkg: m2[1], name: m2[1] });
+          }
         });
+        pkgsList.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
       }
+
+      function renderPkgDropdown(filter = '') {
+        const dd = $('pkgDropdown');
+        if (!dd) return;
+        const f = filter.toLowerCase().trim();
+        let matches = pkgsList;
+        if (f) {
+          matches = pkgsList.filter(p => p.name.toLowerCase().includes(f) || p.pkg.toLowerCase().includes(f));
+        }
+        if (matches.length === 0) {
+          dd.innerHTML = '<div style="padding:10px 12px;font-size:12px;color:var(--muted)">No matching apps found</div>';
+          dd.classList.remove('hidden');
+          return;
+        }
+        dd.textContent = '';
+        matches.forEach(p => {
+          const item = document.createElement('div');
+          item.className = 'pkg-item';
+          const n = document.createElement('div');
+          n.className = 'pkg-item-name';
+          n.textContent = p.name;
+          const k = document.createElement('div');
+          k.className = 'pkg-item-pkg';
+          k.textContent = p.pkg;
+          item.append(n, k);
+          item.onmousedown = (ev) => {
+            ev.preventDefault();
+            selectPkg(p);
+          };
+          dd.appendChild(item);
+        });
+        dd.classList.remove('hidden');
+      }
+
+      function selectPkg(p) {
+        $('fPkg').value = p.pkg;
+        const dd = $('pkgDropdown');
+        if (dd) dd.classList.add('hidden');
+        const base = (p.name || p.pkg).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 32);
+        if (!editing) {
+          if (!$('fId').value.trim() || $('fId').value === 'game1') $('fId').value = base;
+          setPicked('src', '@/apps/' + base);
+          setPicked('dst', 'Android/data/' + p.pkg);
+          $('fOwner').checked = true;
+        }
+      }
+
       function applyMethodState() {
         const sel = $('fMode');
         for (const o of sel.options) o.disabled = o.value !== 'bind' && !vfsOk;
@@ -1215,16 +1324,13 @@
       }
       $('fMode').addEventListener('change', applyMethodState);
       $('fPkg').addEventListener('input', () => {
-        const pkg = $('fPkg').value.trim();
-        if (PKG_RE.test(pkg)) {
-          const base = pkg.split('.').pop() || pkg;
-          if (!editing) {
-            if (!$('fId').value.trim() || $('fId').value === 'game1') $('fId').value = base.slice(0, 32);
-            setPicked('src', '@/apps/' + base);
-            setPicked('dst', 'Android/data/' + pkg);
-            $('fOwner').checked = true;
-          }
-        }
+        renderPkgDropdown($('fPkg').value);
+      });
+      $('fPkg').addEventListener('focus', () => {
+        loadPkgs().then(() => renderPkgDropdown($('fPkg').value));
+      });
+      $('fPkg').addEventListener('blur', () => {
+        setTimeout(() => { const dd = $('pkgDropdown'); if (dd) dd.classList.add('hidden'); }, 200);
       });
       $('addbox').addEventListener('toggle', () => { if ($('addbox').open) { checkVfs(); loadPkgs(); } });
       function entRow(e) {
@@ -1327,8 +1433,8 @@
         $('fId').value = e.id; $('fId').disabled = true;
         setPicked('src', e.src); setPicked('dst', e.dst);
         $('fMode').value = e.mode === 'vfs' ? 'vfs' : 'bind';
-        $('fPkg').value = e.mode === 'vfs' ? (e.pkg || '') : '';
-        $('fOwner').checked = e.owner === 'auto';
+        $('fPkg').value = e.pkg || (pkgFromDst(e.dst) || '');
+        $('fOwner').checked = e.owner !== 'none';
         $('fStop').checked = e.stop === '1';
         $('fMove').checked = e.move === '1';
         $('fAuto').checked = e.auto !== '0';
@@ -1343,7 +1449,8 @@
         editing = null;
         $('fId').disabled = false; $('fId').value = '';
         setPicked('src', ''); setPicked('dst', '');
-        $('fMode').value = 'bind'; $('fPkg').value = ''; $('fOwner').checked = false; $('fStop').checked = false; $('fMove').checked = false; $('fAuto').checked = true;
+        $('fMode').value = 'bind'; $('fPkg').value = ''; const dd = $('pkgDropdown'); if (dd) dd.classList.add('hidden');
+        $('fOwner').checked = true; $('fStop').checked = false; $('fMove').checked = false; $('fAuto').checked = true;
         $('fAdd').textContent = 'Add'; $('addSum').textContent = 'Add folder mount';
         $('fCancel').classList.add('hidden'); applyMethodState();
       }
