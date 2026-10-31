@@ -254,9 +254,16 @@
 
     .tools {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 8px;
       margin-top: 12px;
+    }
+
+    .tools button {
+      padding: 8px 4px;
+      font-size: 13px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
     }
 
     h2 {
@@ -674,6 +681,16 @@
     }
 
     /* ---- warning (Pad 3 only) ------------------------------------------------ */
+    .setrow {
+      padding: 14px 0 0;
+      margin-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+
+    .card .warning {
+      margin-bottom: 14px;
+    }
+
     .warning {
       padding: 14px 16px;
       border-radius: 14px;
@@ -813,12 +830,12 @@
       }
 
       .tools {
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
         gap: 10px;
       }
 
       .tools button {
         min-height: 54px;
+        font-size: 14px;
       }
 
       pre {
@@ -886,32 +903,36 @@
           <div id="err" class="err hidden"></div>
         </section>
 
-        <div class="warning" role="alert">
-          <div class="warning-title"><span aria-hidden="true">⚠</span> OnePlus Pad 3 only</div>
-          <p>This module is created for <a href="https://github.com/TheMojoMan/oneplus-erhai-ubuntu" target="_blank"
-              rel="noopener noreferrer">Ubuntu Linux</a> on OnePlus Pad 3 only. Flashing on other devices may cause
-            hard brick.</p>
-        </div>
-
-        <button id="main" class="primary" disabled>…</button>
-
         <section class="card">
-          <div class="row">
-            <div>Mount automatically on boot<small>After the first unlock</small></div>
-            <label class="sw"><input id="auto" type="checkbox"><span></span></label>
+          <h2>Mount Settings</h2>
+          <div class="warning" role="alert">
+            <div class="warning-title"><span aria-hidden="true">⚠</span> OnePlus Pad 3 only</div>
+            <p>This module is created for <a href="https://github.com/TheMojoMan/oneplus-erhai-ubuntu" target="_blank"
+                rel="noopener noreferrer">Ubuntu Linux</a> on OnePlus Pad 3 only. Flashing on other devices may cause
+              hard brick.</p>
           </div>
-        </section>
-
-        <section class="card">
-          <h2>Partition</h2>
           <div class="form">
             <label>Partition name <small>(/dev/block/by-name/…)</small>
               <input id="pName" type="text" value="data" maxlength="36" autocapitalize="off" autocomplete="off"
-                spellcheck="false"></label>
-            <button id="pApply" type="button">Test &amp; mount</button>
-            <div id="pHint" class="hint">Changing the name checks that the partition exists and is ext4, then unmounts
-              the current one and mounts the new one right away.</div>
+                spellcheck="false" enterkeyhint="done"></label>
+            <div id="pHint" class="hint">Press Enter or tap outside the field to apply. The name is checked (must exist
+              and be ext4), then the current partition is unmounted and the new one mounted.</div>
           </div>
+          <div class="setrow">
+            <div class="row">
+              <div>Mount automatically on boot<small>After the first unlock</small></div>
+              <label class="sw"><input id="auto" type="checkbox"><span></span></label>
+            </div>
+          </div>
+          <div class="setrow">
+            <div class="row">
+              <div>Auto-fix permissions on mount<small>Runs once after every mount (boot or manual) so Android can use
+                  files extracted in Ubuntu. Off by default.</small></div>
+              <label class="sw"><input id="afx" type="checkbox"><span></span></label>
+            </div>
+            <div class="hint" id="afxLast" style="margin-top:8px"></div>
+          </div>
+          <button id="main" class="primary" disabled style="margin-top:14px">…</button>
         </section>
 
         <section class="card">
@@ -958,6 +979,8 @@
                 <datalist id="pkgList"></datalist></label>
               <label class="chk"><input id="fOwner" type="checkbox"><span>Let the target app read and write folder A
                   <small>Turn this on when folder B is an app's own folder (<code>Android/data/&lt;package&gt;</code> or <code>Android/obb/&lt;package&gt;</code>): the top of folder A is handed to that app (chown, mode 2770). Nothing else is changed.</small></span></label>
+              <label id="fMoveRow" class="chk"><input id="fMove" type="checkbox"><span>Move existing files from folder B into folder A
+                  <small>On mount, whatever already sits in folder B is moved onto the Ubuntu side first, so mounting does not hide it. Names that already exist in folder A stay in B.</small></span></label>
               <label class="chk"><input id="fStop" type="checkbox"><span>Stop the app when mounting/unmounting
                   <small>Force-stops the app so it picks up the new folder instead of keeping the old view.</small></span></label>
               <label class="chk"><input id="fAuto" type="checkbox" checked><span>Mount at boot</span></label>
@@ -977,11 +1000,12 @@
             <button id="bFsck">Check filesystem</button>
             <button id="bMedia">Reset media provider</button>
             <button id="bDiag">Diagnostics</button>
-            <button id="bLog" style="grid-column: 1 / -1">Show log</button>
+            <button id="bLog">Show log</button>
+            <button id="bLogDl">Download log</button>
           </div>
           <div class="hint" style="margin-top:10px">Files not opening in a non-root file manager?<br>Run <b>Access
               test</b>, then <b>Make readable</b> (or <b>Make writable</b>).<br>For a permanent fix run the helper inside
-            Ubuntu: <code>sh /data/.ubuntu-data-tools/setup-sharing.sh</code></div>
+            Ubuntu: <code>sh /data/.ubuntu-data-tools/setup-sharing.sh</code><br>An archive extracted in Ubuntu keeps its own private permissions (e.g. 0700), so Android cannot open it. After extracting run <code>share-fix /data/&lt;folder&gt;</code> in Ubuntu (installed by that script), or press <b>Make writable</b> here, or turn on <b>Auto-fix permissions on mount</b>. <b>Diagnostics</b> also lists which folder is blocked and why. <b>Download log</b> saves the log to your Download folder.</div>
           <pre id="out" class="hidden" style="margin-top:12px"></pre>
         </section>
       </div>
@@ -1091,9 +1115,11 @@
         b.textContent = m ? 'Unmount' : (st === 'absent' ? 'Partition not found' : (st === 'disabled' ? 'Partition mount disabled' : 'Mount'));
         b.disabled = busy || st === 'absent' || st === 'waiting' || st === 'conflict' || st === 'disabled';
         $('auto').checked = s.automount === '1';
+        $('afx').checked = s.autofix_perms === '1';
+        $('afxLast').textContent = s.autofix_perms === '1' ? (s.autofix_last ? 'Last run: ' + s.autofix_last : 'Runs once after each mount; has not run yet.') : '';
         if (document.activeElement !== $('pName') && !pApplying) $('pName').value = s.part_name || 'data';
-        $('pApply').disabled = busy || pApplying;
-        for (const id of ['bFsck', 'bMedia', 'bDiag', 'bLog', 'bAccess', 'bRead', 'bWrite']) $(id).disabled = busy;
+        $('pName').disabled = busy || pApplying;
+        for (const id of ['bFsck', 'bMedia', 'bDiag', 'bLog', 'bLogDl', 'bAccess', 'bRead', 'bWrite']) $(id).disabled = busy;
         for (const id of ['bAccess', 'bRead', 'bWrite']) $(id).disabled = busy || !m;
         $('bFsck').disabled = busy || m || st === 'absent' || st === 'disabled';
       }
@@ -1135,12 +1161,24 @@
         refresh();
       };
       $('bFsck').onclick = async () => { if (await confirmBox('Run e2fsck on the unmounted partition? Make sure Ubuntu is not using it.')) run('Checking', 'fsck'); };
+      $('afx').onchange = async (ev) => {
+        const on = ev.target.checked;
+        if (on && !(await confirmBox('Each time the partition is mounted (at boot or when you press Mount) the module will check it once and give group media_rw read/write access to files whose group or permissions Android cannot use, for example a folder extracted in Ubuntu. At boot it waits until the system has settled. Owners stay the same. Files become readable by apps with "All files access". Turn on?'))) { ev.target.checked = false; return; }
+        const r = await ud('set AUTOFIX_PERMS ' + (on ? 1 : 0));
+        toast(r.code === 0 ? (on ? 'Auto-fix on' : 'Auto-fix off') : 'Could not save');
+        if (r.code !== 0) ev.target.checked = !on;
+        refresh();
+      };
       $('bAccess').onclick = () => run('Testing', 'access');
       $('bRead').onclick = async () => { if (await confirmBox('Give group media_rw (Android\'s storage daemon) read access to every file? Owners stay the same; the group of every file becomes media_rw.')) run('Fixing', 'fixperms read'); };
       $('bWrite').onclick = async () => { if (await confirmBox('Give group media_rw read AND write access to every file? Owners stay the same; the group of every file becomes media_rw.')) run('Fixing', 'fixperms rw'); };
       $('bMedia').onclick = async () => { if (await confirmBox('Stop the media provider so /sdcard re-reads the mount? File managers may close.')) run('Restarting', 'restart-media'); };
       $('bDiag').onclick = () => run('Collecting', 'diag');
       $('bLog').onclick = () => run('Loading', 'log 80');
+      $('bLogDl').onclick = async () => {
+        const r = await run('Saving log', 'log-export');
+        toast(r && r.code === 0 ? 'Log saved to Download' : 'Could not save the log');
+      };
 
       // ---- folder mounts ----------------------------------------------------------
       let vfsOk = false;
@@ -1166,6 +1204,7 @@
         sel.disabled = !vfsOk && sel.value === 'bind';
         const isVfs = sel.value === 'vfs';
         $('fPkgRow').classList.toggle('hidden', !isVfs);
+        $('fMoveRow').classList.toggle('hidden', isVfs);
         if (isVfs) { if (!$('fPkg').value.trim()) $('fPkg').value = pkgFromDst(picked.dst); loadPkgs(); }
         $('fHint').textContent = vfsOk ? 'Hybrid Mount VFS provider is responding.' : 'Hybrid Mount is not available (metamodule or kernel provider missing), so only Bind mount can be used.';
       }
@@ -1203,7 +1242,7 @@
         const r = await ud('bind list');
         const box = $('entries'); box.textContent = '';
         const list = r.out.split('\n').filter((l) => l.startsWith('entry=')).map((l) => {
-          const [id, state, mode, auto, src, dst, owner, stop, pkg] = l.slice(6).split('|'); return { id, state, mode, auto, src, dst, owner, stop, pkg: pkg || '' };
+          const [id, state, mode, auto, src, dst, owner, stop, pkg, move] = l.slice(6).split('|'); return { id, state, mode, auto, src, dst, owner, stop, pkg: pkg || '', move: move || '0' };
         });
         entCache = list;
         if (!list.length) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = 'No folder mounts yet.'; box.appendChild(d); return; }
@@ -1263,7 +1302,7 @@
         showOut(ICON[t.status] + ' ' + e.id + ': ' + t.msg + '\n\n' + t.detail);
         loadEntries();
         if (t.status === 'fail' && /permission/i.test(t.msg) &&
-          await confirmBox('Make folder A group-writable for Android\'s media daemon (group media_rw, setgid) and test again?')) {
+          await confirmBox('Repair the permissions of folder A and everything inside it (for an app folder under Android/data or Android/obb: owned by that app; otherwise group media_rw, group-writable) and test again?')) {
           const f = await ud('bind fixwrite ' + e.id);
           toast(f.code === 0 ? 'Permissions fixed' : 'Fix failed'); if (f.code) showOut(f.out + f.err);
           queueTest(e, true);
@@ -1279,6 +1318,7 @@
         $('fPkg').value = e.mode === 'vfs' ? (e.pkg || '') : '';
         $('fOwner').checked = e.owner === 'auto';
         $('fStop').checked = e.stop === '1';
+        $('fMove').checked = e.move === '1';
         $('fAuto').checked = e.auto !== '0';
         $('fAdd').textContent = 'Save changes';
         $('addSum').textContent = 'Edit folder mount: ' + e.id;
@@ -1291,7 +1331,7 @@
         editing = null;
         $('fId').disabled = false; $('fId').value = '';
         setPicked('src', ''); setPicked('dst', '');
-        $('fMode').value = 'bind'; $('fPkg').value = ''; $('fOwner').checked = false; $('fStop').checked = false; $('fAuto').checked = true;
+        $('fMode').value = 'bind'; $('fPkg').value = ''; $('fOwner').checked = false; $('fStop').checked = false; $('fMove').checked = false; $('fAuto').checked = true;
         $('fAdd').textContent = 'Add'; $('addSum').textContent = 'Add folder mount';
         $('fCancel').classList.add('hidden'); applyMethodState();
       }
@@ -1418,7 +1458,7 @@
         if (!PATH_RE.test(dst) || dst.includes('..')) return toast('Folder B has invalid characters');
         const mode = $('fMode').value, pkg = $('fPkg').value.trim();
         if (mode === 'vfs' && !PKG_RE.test(pkg)) return toast('Enter the app package, e.g. com.example.game');
-        const opts = ['mode=' + mode, ...(mode === 'vfs' ? ['pkg=' + pkg] : []), 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
+        const opts = ['mode=' + mode, ...(mode === 'vfs' ? ['pkg=' + pkg] : []), 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'move=' + (mode === 'bind' && $('fMove').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
         const wasEdit = !!editing;
         const r = await ud(['bind', wasEdit ? 'edit' : 'add', id, src, dst, ...opts].join(' '));
         if (r.code !== 0) { showOut(r.out + r.err); return toast(wasEdit ? 'Not saved' : 'Not added'); }
@@ -1442,13 +1482,13 @@
         if (!PNAME_RE.test(name) || name.startsWith('-') || name === '.' || name === '..') {
           $('pHint').textContent = '✖ Name: letters, digits, . _ - only'; $('pName').value = was; return;
         }
-        pApplying = true; $('pApply').disabled = true;
+        pApplying = true; $('pName').disabled = true;
         $('pHint').textContent = 'Checking ' + name + '…';
         const t = await ud('partition test ' + name);
         const o = parse(t.out);
         if (t.code !== 0 || o.status !== 'ok') {
           $('pHint').textContent = '✖ ' + (o.msg || t.err.trim() || 'Partition test failed') + ' (still using ' + was + ')';
-          toast('Partition not usable'); $('pName').value = was; pApplying = false; $('pApply').disabled = busy;
+          toast('Partition not usable'); $('pName').value = was; pApplying = false; $('pName').disabled = busy;
           return;
         }
         $('pHint').textContent = '✔ ' + o.msg + ' · switching…';
@@ -1465,7 +1505,6 @@
         $('pHint').textContent = r.code === 0 ? ('✔ Now using ' + now + '.') : (now === name ? ('Saved ' + name + ', but it is not mounted yet. See details below.') : ('✖ Not switched, still using ' + now + '. See details below.'));
         toast(r.code === 0 ? 'Switched to ' + now : 'Not switched');
       }
-      $('pApply').onclick = applyPartName;
       $('pName').addEventListener('change', applyPartName);
       $('pName').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('pName').blur(); } });
 

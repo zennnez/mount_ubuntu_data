@@ -77,7 +77,15 @@ Fixes, from quickest to permanent:
    `sh /data/.ubuntu-data-tools/setup-sharing.sh` (the module publishes it there; `-u user` selects users, `-m` the mountpoint).
    It creates group `media_rw` (1023), adds your user, and grants that group rwX through POSIX ACLs including a **default ACL**,
    so files created later, even by root with `umask 077`, stay accessible. Other Ubuntu users and other Android apps get nothing.
-3. **Plain umask:** in Ubuntu use `umask 002` and put your user in group 1023; new files are then group-writable by default.
+3. **Extracted archives (the common trap):** an archive carries its own modes, usually `0700`/`0600`, and `tar -x` as root also
+   restores its owner and group. That skips the setgid group inheritance and the umask, and the `chmod` to `0700` sets the ACL
+   mask to `---`, which switches off every ACL entry, including the `media_rw` one from `setup-sharing.sh`. The folder looks
+   normal in Ubuntu, but Android cannot open it (it may even be missing from the storage view). Plain files you create
+   yourself keep working, which is why this is easy to miss. No `tar`/`unzip` option widens the modes stored in the archive, so repair it after extracting:
+   * Ubuntu: `share-fix /data/<folder>` (the command `setup-sharing.sh` installs; it only touches that folder and tests it as the Android media daemon), or
+   * Android: WebUI **Make writable**, CLI `ubuntu-data.sh fixperms rw [folder]`, or
+   * automatic: switch on **Auto-fix permissions on mount** (`AUTOFIX_PERMS=1`): it runs once after every mount (boot and manual). Off by default (see below).
+4. **Plain umask:** in Ubuntu use `umask 002` and put your user in group 1023; new files are then group-writable by default.
 
 **Check it:** WebUI **Access test** (or `ubuntu-data.sh access`) runs the checks as uid 10234 / gid 1023, the identity of the
 Android media daemon, and lists what is unreadable.
@@ -134,11 +142,12 @@ VFS rules are runtime-only: the module re-applies them on every boot (and waits 
 | Key | Default | Meaning |
 |---|---|---|
 | `DEV` | `auto` | block device, or `auto` = `/dev/block/by-name/<PART_NAME>` |
-| `PART_NAME` | `data` | partition name under `/dev/block/by-name/` (WebUI: Partition box) |
+| `PART_NAME` | `data` | partition name under `/dev/block/by-name/` (WebUI: Mount Settings) |
 | `PUBLISH_TOOLS` | `1` | copy the Ubuntu helper to `/.ubuntu-data-tools/` on the partition |
 | `MOUNT_NAME` | `ubuntu` | folder in internal storage |
 | `AUTOMOUNT` | `0` | mount after boot/unlock (off by default; switch it on in the WebUI) |
 | `FIX_ROOT_PERMS` | `1` | chown root of partition to media_rw, setgid |
+| `AUTOFIX_PERMS` | `0` | `1` = once after every mount (boot-mount and manual mount) fix files Android cannot use (e.g. extracted archives) |
 | `DISABLE_DATA_MOUNT` | `0` | `1` = never mount the partition (dual boot Android + Linux option only) |
 | `EXTRA_BINDS` | empty | legacy `"src:dst ..."` bind mounts; prefer Folder mounts |
 
@@ -161,6 +170,31 @@ as before). This option is for **dual boot Android + Linux**, to mount the addit
 **Do not use it if you do not dual boot.** When on, the module never mounts the partition (boot, Action button, WebUI
 Mount button); folder mounts whose source is an absolute path keep working. Turning it on unmounts the partition first.
 CLI: `ubuntu-data.sh set DISABLE_DATA_MOUNT 1|0`.
+
+## Changes in v2.8
+
+* **Fix: a folder extracted in Ubuntu was invisible/unusable in Android even after the fix buttons.** Causes found and handled:
+  * `tar`/`unzip` as root leave `0700` modes, a foreign group and an ACL mask of `---` (see *Extracted archives* above).
+  * The permission pass at mount runs only once per partition (marker `.android_perms_initialized`), so later extractions
+    were never repaired automatically.
+  * `setup-sharing.sh` hid its own errors. It now prints them, repairs a single folder (`share-fix /path`), fixes the ACL mask,
+    and finishes with a test as the Android media daemon (uid 10234, gid 1023).
+* `fixperms read|rw [folder]` now (1) can be limited to one folder, (2) re-tests as the media daemon and reports how many
+  folders/files are still blocked, (3) relabels the files `media_rw_data_file` when the partition could not be mounted with a
+  forced label, and (4) when a folder is still missing in the Android storage view, restarts MediaProvider once and re-checks.
+* **New `inspect [path]` (also part of WebUI "Diagnostics"):** per folder shows owner, mode, SELinux label, whether the media daemon can open it
+  (and nested folders), whether Android's storage view lists it, and warns about case clashes (`Docs` + `docs`: Android is
+  case-insensitive and shows one), symlinks, hidden/invalid names and recent SELinux denials.
+* **New opt-in `AUTOFIX_PERMS=1`** (WebUI switch "Auto-fix permissions on mount", default **off**): once after every successful mount
+  (boot-mount, WebUI/Action mount, partition switch) it fixes only entries Android cannot use (group not `media_rw`, folders
+  without group rwx + setgid, files without group rw). It runs in the background at lowest priority, at boot only after the
+  system has been up for 2 minutes, is stopped before an unmount, skips entries that are already correct, and restarts
+  MediaProvider if folders are still missing from Android's view afterwards. It no longer runs on a timer.
+* **Folder mounts:** `owner=auto` now fixes the whole of folder A for the app (not just its top folder); the read/write test and the fix use the app's own uid/gid for `Android/data|obb/<pkg>`, and the test also writes through Android's storage view as the app. New option `move=1` ("Move existing files from folder B into folder A") moves what already sits in B onto the partition before the bind.
+* **Folder mounts no longer leave stale mounts behind:** after unmounting, and before every bind, any leftover mount from the partition at folder B (and its Android views) is removed, so remounts no longer skip views or stack on top of old mounts. The status-icon test lists how many mounts sit at folder B.
+* **Folder-mount test fixed:** for `Android/data|obb/<pkg>` the media daemon (with its groups media_rw, ext_data_rw, ext_obb_rw) is tested on folder A, and the app itself is tested through Android's storage view; apps never open `/data/media` directly. The move option now merges folders that exist on both sides, drops identical duplicates and reports the real error of a failed move.
+* WebUI: Mount Settings card (warning, partition name, boot-mount and auto-fix switches, Mount button); Diagnostics includes the
+  folder inspection; new **Download log** button (`ubuntu-data.sh log-export`) saves the full log to `/sdcard/Download/`.
 
 ## Changes in v2.7
 

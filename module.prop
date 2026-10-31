@@ -1,7 +1,7 @@
 id=mount_ubuntu_data
 name=Mount Ubuntu Data
-version=v2.7
-versionCode=270
+version=v2.8
+versionCode=280
 author=zen
 support=https://t.me/kokernel
 description=Mounts the Ubuntu ext4 data partition (/dev/block/by-name/data) at /sdcard/ubuntu so Android and Ubuntu share files. Live status appears here once the module is active.
