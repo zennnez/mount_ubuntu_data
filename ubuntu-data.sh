@@ -9,7 +9,8 @@
 #   mount             mount the partition (idempotent)
 #   umount [force]    unmount (force = lazy detach if busy)
 #   toggle            mount if unmounted, umount if mounted
-#   set KEY 0|1       change AUTOMOUNT / FIX_ROOT_PERMS / DISABLE_DATA_MOUNT in config.sh
+#   set KEY 0|1       change AUTOMOUNT / FIX_ROOT_PERMS / DISABLE_DATA_MOUNT / AUTOFIX_PERMS in config.sh
+#                     (AUTOFIX_PERMS = fix permissions once after every mount: boot-mount and manual mount)
 #   partition get|test <name>|set <name> [force]
 #                     partition = /dev/block/by-name/<name> (default "data"); test checks it exists
 #                     and is ext4; set tests, saves, unmounts the old one and mounts the new one
@@ -19,12 +20,17 @@
 #   packages [filter] list installed apps (pkg= uid=) for the VFS picker
 #   layout            show which block device the partition name resolves to
 #   access            test what the Android media daemon (gid media_rw) can read/write
-#   fixperms read|rw  group -> media_rw (1023) + g+rX (read) or g+rwX (rw), recursive, symlink-safe
+#   fixperms read|rw [folder]
+#                     group -> media_rw (1023) + g+rX (read) or g+rwX (rw), recursive, symlink-safe;
+#                     optional folder (relative to the partition) limits it; then re-tests as the media
+#                     daemon, relabels if the mount is not force-labelled, and re-reads the Android view
+#   inspect [path]    why can't Android see a folder? permissions, SELinux label, name, case clash, view
 #   fsck              e2fsck -p on the (unmounted) partition
 #   restart-media     force-stop MediaProvider so /sdcard re-reads the mount
 #   fixview           restart MediaProvider and wait until apps can see the mount in /sdcard
-#   diag              diagnostics dump
+#   diag              diagnostics dump (includes the folder inspection)
 #   log [N]           last N log lines (default 60)
+#   log-export        save the full log to /sdcard/Download/ (WebUI: Download log)
 #   boot-mount        used by service.sh (waits for first unlock, then mounts)
 #   daemon            keeps the module.prop description up to date
 #   init-config       create config.sh if missing
@@ -55,6 +61,8 @@ SYSBLK=${UD_SYSBLK:-/sys/class/block}
 DEVBLK=${UD_DEVBLK:-/dev/block}
 
 mkdir -p "$DATA_DIR" 2>/dev/null
+NICE_CMD=""
+command -v nice >/dev/null 2>&1 && NICE_CMD="nice -n 19"
 chmod 0700 "$DATA_DIR" 2>/dev/null
 
 # ------------------------------------------------------------------------------
@@ -134,6 +142,7 @@ load_conf() {
   AUTOMOUNT=0
   FIX_ROOT_PERMS=1
   DISABLE_DATA_MOUNT=0
+  AUTOFIX_PERMS=0
   EXTRA_BINDS=""
   PUBLISH_TOOLS=1
   PARTNAME_DENY="userdata metadata persist* cache misc frp keystore devinfo oplusreserve* oem* modem* super boot* init_boot* vendor_boot* dtbo* vbmeta* recovery*"
@@ -146,6 +155,7 @@ load_conf() {
   valid_partname "$PART_NAME" || PART_NAME=data
   [ -n "$DEV" ] || DEV=auto
   [ "$DISABLE_DATA_MOUNT" = "1" ] || DISABLE_DATA_MOUNT=0
+  [ "$AUTOFIX_PERMS" = "1" ] || AUTOFIX_PERMS=0
   TARGET=$SD_BASE/$MOUNT_NAME
   SDPATH=/sdcard/$MOUNT_NAME
 
@@ -171,6 +181,7 @@ cmd_init_config() {
   if [ -f "$CONF" ]; then
     # upgrade from <= v2.6 (userdata + offset): add the partition name key
     grep -q '^PART_NAME=' "$CONF" 2>/dev/null || printf '\nPART_NAME=data\n' >> "$CONF"
+    grep -q '^AUTOFIX_PERMS=' "$CONF" 2>/dev/null || printf '\n# 1 = once after every mount (boot-mount and manual mount) fix files that Android cannot use\nAUTOFIX_PERMS=0\n' >> "$CONF"
     return 0
   fi
   cat > "$CONF" <<'EOF'
@@ -189,6 +200,9 @@ FIX_ROOT_PERMS=1
 # 1 = never mount the shared partition (default 0 = mount it). ONLY for dual boot Android + Linux,
 # where the additional sdaX partition is mounted in both systems. Do not use it without dual boot.
 DISABLE_DATA_MOUNT=0
+# 1 = once right after every successful mount (boot-mount and manual mount), fix files whose group is
+# not media_rw or that lack group rw / setgid, e.g. an archive extracted as root in Ubuntu. Default 0 = off.
+AUTOFIX_PERMS=0
 # Extra bind mounts made after the main mount, space separated "source:destination".
 # "@" means the mounted partition. Use this to expose it as /data inside an Ubuntu
 # chroot/container rootfs that lives on Android, e.g.
@@ -454,6 +468,8 @@ cmd_status() {
   echo "automount=$AUTOMOUNT"
   echo "fix_root_perms=$FIX_ROOT_PERMS"
   echo "disable_data_mount=$DISABLE_DATA_MOUNT"
+  echo "autofix_perms=$AUTOFIX_PERMS"
+  echo "autofix_last=$(cat "$DATA_DIR/autofix.last" 2>/dev/null)"
   echo "last_error=$S_ERR"
   if vfs_ready_cached; then echo "vfs_available=1"; else echo "vfs_available=0"; fi
   echo "summary=$S_SUMMARY"
@@ -600,10 +616,12 @@ do_mount() {
     return 3
   fi
 
+  _init_scan=0
   if [ "$FIX_ROOT_PERMS" = "1" ]; then
     chown 1023:1023 "$TARGET" 2>/dev/null
     chmod 2775 "$TARGET" 2>/dev/null
     if [ ! -f "$TARGET/.android_perms_initialized" ]; then
+      _init_scan=1
       say "[-] Initializing Android media_rw permissions on $TARGET (background)..."
       (
         find "$TARGET" -xdev ! -type l -exec chgrp 1023 {} + 2>/dev/null || true
@@ -614,6 +632,8 @@ do_mount() {
       ) >/dev/null 2>&1 </dev/null &
     fi
   fi
+  # the first-mount pass above already covers everything; otherwise run the one-shot auto-fix
+  [ "$_init_scan" = "1" ] || autofix_on_mount
 
   publish_tools
   : > "$BINDS"
@@ -647,6 +667,7 @@ umount_one() { # <path> <force> ; returns 0 if gone, 1 if still mounted
 do_umount() {
   load_conf
   _force=$1
+  stop_scan
   bind_umount_all "$_force"
   if ! mnt_find "$TARGET"; then
     say "[=] Nothing mounted at $TARGET"
@@ -698,7 +719,8 @@ init_bindconf() {
 # Folder mounts. One per line:  id  source(A)  destination(B)  [options]
 #   source      "@" or "@/sub/dir" = the mounted partition, or an absolute path
 #   destination relative path = inside internal storage (/sdcard/<path>), or an absolute path
-#   options     mode=bind|vfs   owner=none|auto|UID:GID   auto=0|1   pkg=name   stop=0|1
+#   options     mode=bind|vfs   owner=none|auto|UID:GID   auto=0|1   pkg=name   stop=0|1   move=0|1
+#   move=1 moves what is already in folder B into folder A before mounting (nothing is hidden or lost)
 #   mode=vfs redirects folder B to folder A for that one app (Hybrid Mount). Example:
 #   game1  @/games/mygame  Android/data/com.example.game/files  mode=vfs pkg=com.example.game stop=1
 # Bind mount example (every app sees it):
@@ -738,7 +760,7 @@ entry_get() {
 }
 
 entry_parse() {
-  E_MODE=bind; E_OWNER=none; E_AUTO=1; E_UID=""; E_STOP=0; E_PKG_OPT=""
+  E_MODE=bind; E_OWNER=none; E_AUTO=1; E_UID=""; E_STOP=0; E_PKG_OPT=""; E_MOVE=0
   for _o in $E_OPTS; do
     case "$_o" in
       mode=*)  E_MODE=${_o#mode=} ;;
@@ -747,6 +769,7 @@ entry_parse() {
       uid=*)   E_UID=${_o#uid=} ;;
       pkg=*)   E_PKG_OPT=${_o#pkg=} ;;
       stop=*)  E_STOP=${_o#stop=} ;;
+      move=*)  E_MOVE=${_o#move=} ;;
     esac
   done
   case "$E_SRC" in
@@ -823,6 +846,72 @@ entry_apply_owner() {
   esac
   chown "$_own" "$E_SRCP" 2>/dev/null && chmod 2770 "$E_SRCP" 2>/dev/null \
     && say "[+] $E_ID: $E_SRCP is now owned by $_own (mode 2770)"
+  # the app also needs everything INSIDE folder A (Ubuntu or Android created it with other owners/groups)
+  tree_own "$E_SRCP" "${_own%%:*}" "${_own#*:}"
+  say "[+] $E_ID: contents of folder A are usable by $_own"
+}
+
+# entry_move_in: move what already sits in folder B (underneath, before the bind) into folder A.
+# Top-level names that already exist in A are left in B and reported. Bind mode only.
+# move_tree <from dir> <to dir>: move every entry of <from> into <to>. Folders that exist on both sides are merged,
+# identical duplicate files are dropped from <from>, differing duplicates are left in place. Counts go to $_mc.
+move_tree() {
+  ls -A "$1" 2>/dev/null | while IFS= read -r _n; do
+    _f=$1/$_n; _t=$2/$_n
+    if [ -d "$_f" ] && [ ! -L "$_f" ] && [ -d "$_t" ] && [ ! -L "$_t" ]; then
+      move_tree "$_f" "$_t"
+      rmdir "$_f" 2>/dev/null
+    elif [ -e "$_t" ] || [ -L "$_t" ]; then
+      if [ -f "$_f" ] && [ -f "$_t" ] && cmp -s "$_f" "$_t"; then
+        rm -f "$_f" && echo moved >> "$_mc"
+      else
+        say "[~] $E_ID: '${_f#"$_mb"/}' exists in folder A with different content; left in folder B"
+        echo skip >> "$_mc"
+      fi
+    else
+      _me=$(mv "$_f" "$_t" 2>&1)
+      if [ $? -eq 0 ]; then
+        echo moved >> "$_mc"
+        case "$E_OWNER" in none|"") chgrp -R 1023 "$_t" 2>/dev/null; chmod -R g+rwX "$_t" 2>/dev/null ;; esac
+      else
+        say "[!] $E_ID: could not move '${_f#"$_mb"/}': ${_me:-unknown error}"
+        echo fail >> "$_mc"
+      fi
+    fi
+  done
+}
+
+# entry_move_in: move what already sits in folder B (underneath, before the bind) into folder A. Bind mode only.
+entry_move_in() {
+  [ "$E_MOVE" = "1" ] && [ "$E_MODE" = "bind" ] || return 0
+  _mb=$(entry_dsts | head -n 1)
+  [ -d "$_mb" ] || return 0
+  if mnt_find "$_mb"; then _log "$E_ID: move skipped, $_mb is already a mount point"; return 0; fi
+  case "$E_SRCP/" in "$_mb"/*) say "[!] $E_ID: folder A is inside folder B; cannot move files"; return 11 ;; esac
+  _mc=$DATA_DIR/.mvcount; : > "$_mc"
+  move_tree "$_mb" "$E_SRCP"
+  _mm=$(grep -c moved "$_mc" 2>/dev/null); _mf=$(grep -c fail "$_mc" 2>/dev/null)
+  rm -f "$_mc"
+  [ "${_mm:-0}" -gt 0 ] && say "[+] $E_ID: moved ${_mm} item(s) from $_mb to $E_SRCP"
+  [ "${_mf:-0}" -gt 0 ] && return 3
+  return 0
+}
+
+# tree_own <root> <uid> <gid>: owner uid:gid, u+g rwX, folders setgid. Only entries that differ are touched.
+tree_own() {
+  find "$1" -xdev ! -type l \( ! -uid "$2" -o ! -gid "$3" -o \( -type d ! -perm -2770 \) -o \( ! -type d ! -perm -0660 \) \) \
+    -exec sh -c 'u=$1; g=$2; shift 2; chown "$u:$g" "$@" 2>/dev/null; chmod ug+rwX "$@" 2>/dev/null; for f; do [ -d "$f" ] && chmod g+s "$f" 2>/dev/null; done' sh "$2" "$3" {} + 2>/dev/null
+  return 0
+}
+
+# app_identity: for a destination under Android/data|obb/<pkg> sets APP_UID APP_GID (the identity that app really uses)
+app_identity() {
+  APP_UID=""; APP_GID=""
+  [ -n "$E_KIND" ] && [ -n "$E_PKG" ] || return 1
+  APP_UID=$(pkg_uid "$E_PKG")
+  [ -n "$APP_UID" ] || return 1
+  if [ "$E_KIND" = "obb" ]; then APP_GID=1079; else APP_GID=1078; fi
+  return 0
 }
 
 entry_mount() { # <id> <ctx: manual|auto>
@@ -856,6 +945,8 @@ entry_mount() { # <id> <ctx: manual|auto>
     case "$_d/" in "$E_SRCP"/*) say "[!] $E_ID: destination is inside the source"; return 11 ;; esac
   done
 
+  [ "$E_MODE" = "bind" ] && entry_sweep 1
+  entry_move_in || return $?
   entry_apply_owner
 
   _sf=$(entry_statefile "$E_ID")
@@ -1036,10 +1127,29 @@ detail=$*"; }
   echo "$_det" | sed '/^$/d'
 }
 
+# entry_sweep <force 0|1>: unmount every mount still sitting at folder B or its Android views that comes from the
+# partition itself (leftovers the state file does not know about; they stack or block the next mount).
+entry_sweep() {
+  case "$E_SRC" in @|@/*) ;; *) return 0 ;; esac
+  [ -n "$DEV_MM" ] || return 0
+  for _sd in $(entry_dsts); do
+    _sn=0
+    while mnt_find "$_sd" && [ "$MI_MM" = "$DEV_MM" ] && [ "$_sn" -lt 8 ]; do
+      if umount "$_sd" 2>/dev/null || { [ "$1" = "1" ] && umount -l "$_sd" 2>/dev/null; }; then
+        _log "$E_ID: removed leftover mount at $_sd"
+      else
+        break
+      fi
+      _sn=$((_sn + 1))
+    done
+  done
+  return 0
+}
+
 entry_umount() { # <id> <force>
   entry_get "$1" || { say "[!] no folder mount named '$1'"; return 1; }
   _sf=$(entry_statefile "$1")
-  [ -f "$_sf" ] || { return 0; }
+  [ -f "$_sf" ] || { entry_sweep "$2"; return 0; }
   _bad=0
   for _line in $(sed -e 's/ /|/g' "$_sf" | sed '1!G;h;$!d'); do
     _k=${_line%%|*}; _rest=${_line#*|}
@@ -1050,6 +1160,7 @@ entry_umount() { # <id> <force>
     esac
   done
   if [ $_bad -eq 0 ]; then
+    entry_sweep "$2"
     rm -f "$_sf" "$_sf.boot"
     say "[+] $1 unmounted"
     [ "$E_STOP" = "1" ] && [ -n "$E_PKG" ] && am force-stop "$E_PKG" 2>/dev/null
@@ -1101,7 +1212,7 @@ bind_validate() { # <src> <dst> [opts...]
   for _x in $DST_DENY; do [ "$_vd" = "$_x" ] && { echo "refusing destination $_vd"; return 11; }; done
   for _o in "$@"; do
     case "$_o" in
-      mode=bind|mode=vfs|mode=auto|owner=none|owner=auto|auto=0|auto=1|stop=0|stop=1) ;;
+      mode=bind|mode=vfs|mode=auto|owner=none|owner=auto|auto=0|auto=1|stop=0|stop=1|move=0|move=1) ;;
       owner=[0-9]*:[0-9]*|uid=[0-9]*) case "${_o#*=}" in *[!0-9:]*) echo "bad option $_o"; return 2 ;; esac ;;
       pkg=*) valid_pkg "${_o#pkg=}" || { echo "bad package name '${_o#pkg=}'"; return 2; } ;;
       *) echo "bad option $_o"; return 2 ;;
@@ -1139,6 +1250,13 @@ bind_edit() {
 entry_fixwrite() {
   entry_get "$1" || { echo "no folder mount named '$1'"; return 1; }
   [ -d "$E_SRCP" ] || { echo "source folder $E_SRCP does not exist"; return 1; }
+  if app_identity; then
+    # an app's own folder: the app uid + ext_data_rw/obb group must own it (group media_rw would lock the app out)
+    chown "$APP_UID:$APP_GID" "$E_SRCP" 2>/dev/null; chmod 2770 "$E_SRCP" 2>/dev/null
+    tree_own "$E_SRCP" "$APP_UID" "$APP_GID"
+    say "[+] $E_ID: $E_SRCP is now owned by $APP_UID:$APP_GID ($E_PKG), group-writable, setgid"
+    return 0
+  fi
   find "$E_SRCP" -xdev ! -type l -exec chgrp 1023 {} + 2>&1 | tail -n 3
   find "$E_SRCP" -xdev ! -type l -exec chmod g+rwX {} + 2>&1 | tail -n 3
   find "$E_SRCP" -xdev -type d -exec chmod g+s {} + 2>&1 | tail -n 3
@@ -1160,6 +1278,12 @@ detail=$*"; }
   _add "folder A : $(ls -dnZ "$E_SRCP" 2>/dev/null || ls -dn "$E_SRCP" 2>/dev/null)"
   _add "folder B : $(ls -dnZ "$_dst" 2>/dev/null || ls -dn "$_dst" 2>/dev/null)"
   _lbl=$(ls -dZ "$_dst" 2>/dev/null)
+  for _td in $(entry_dsts); do
+    _tc=0
+    while read -r _i1 _i2 _i3 _i4 _i5 _irest; do [ "$_i5" = "$_td" ] && _tc=$((_tc + 1)); done < /proc/self/mountinfo
+    _add "mounts at $_td: $_tc"
+    [ "$_tc" -gt 1 ] && [ "$_st" = ok ] && { _st=warn; _msg="Several mounts are stacked on folder B (leftovers); unmount and mount again"; }
+  done
 
   # 1. read-only mount?
   if mnt_find "$_dst"; then
@@ -1177,8 +1301,33 @@ detail=$*"; }
     fi
   fi
 
+  # 3a. app folder (Android/data|obb/<pkg>): Android's media daemon reaches folder A with the groups media_rw (1023),
+  # ext_data_rw (1078) and ext_obb_rw (1079). Apps never open /data/media directly, so the app itself is tested in 3b.
+  _appdone=0
+  if [ "$_rootok" = 1 ] && app_identity; then
+    _appdone=1
+    _muid=$(media_uid)
+    rm -rf "$_dst/$_tn.d" "$_dst/$_tn" 2>/dev/null
+    RA_GROUPS=1023,1078,1079
+    _o=$(run_as "$_muid" 1023 "id; mkdir '$_dst/$_tn.d' && echo ok > '$_dst/$_tn' && [ \"\$(cat '$_dst/$_tn')\" = ok ]" 2>&1)
+    _r=$?
+    RA_GROUPS=""
+    [ $_r -ne 99 ] && _add "ran as: $(echo "$_o" | tr '\n' ' ' | cut -c1-300)"
+    if [ $_r -eq 99 ]; then
+      _st=warn; _msg="Root works; this device cannot run a test with the media daemon's groups (setpriv/su without group support), so folder A could not be verified"
+    elif [ $_r -ne 0 ]; then
+      _st=fail
+      _msg="Permission problem: the Android media daemon (uid $_muid, groups media_rw/ext_data_rw/ext_obb_rw) cannot write in folder A. Press the status icon to fix, or enable 'Let the target app read and write folder A'"
+      _add "as media daemon uid $_muid + groups 1023,1078,1079: create folder/file FAILED"
+      _add "folder A top: $(ls -dn "$E_SRCP" 2>/dev/null)"
+    else
+      _add "media daemon (uid $_muid, groups 1023,1078,1079): create folder + file + read back: ok"
+    fi
+    rm -rf "$_dst/$_tn.d" "$_dst/$_tn" 2>/dev/null
+  fi
+
   # 3. Android media daemon identity (what writes files for /sdcard apps)
-  if [ "$_rootok" = 1 ]; then
+  if [ "$_rootok" = 1 ] && [ "$_appdone" = 0 ]; then
     _muid=$(pkg_uid com.google.android.providers.media.module); [ -z "$_muid" ] && _muid=$(pkg_uid com.android.providers.media.module); [ -z "$_muid" ] && _muid=10234
     rm -rf "$_dst/$_tn.d" "$_dst/$_tn" 2>/dev/null
     run_as "$_muid" 1023 "mkdir '$_dst/$_tn.d' && echo ok > '$_dst/$_tn' && [ \"\$(cat '$_dst/$_tn')\" = ok ]" >/dev/null 2>&1
@@ -1200,6 +1349,29 @@ detail=$*"; }
       _add "media daemon (uid $_muid, gid 1023): create folder + file + read back: ok"
     fi
     rm -rf "$_dst/$_tn.d" "$_dst/$_tn" 2>/dev/null
+  fi
+
+  # 3b. app folder: write through Android's own storage layer as the app (the path the app really uses)
+  _fv=/storage/emulated/0/$E_REL
+  if [ "$_appdone" = 1 ] && [ "$_st" = ok ] && [ -n "$E_REL" ] && [ -d "$_fv" ]; then
+    rm -rf "$E_SRCP/$_tn" "$_fv/$_tn" 2>/dev/null
+    run_as "$APP_UID" "$APP_GID" "echo ok > '$_fv/$_tn' && [ \"\$(cat '$_fv/$_tn')\" = ok ]" >/dev/null 2>&1
+    _r=$?
+    if [ $_r -eq 99 ]; then
+      _add "storage view: not tested (no setpriv/su uid support)"
+    elif [ $_r -ne 0 ]; then
+      _st=fail
+      _msg="Folder A is fine, but Android's storage layer blocks the app at $_fv. Use Reset media provider, then test again"
+      _add "as app uid $APP_UID: write on $_fv FAILED"
+      _add "storage view listing: $(ls -dn "$_fv" 2>&1)"
+    elif [ -f "$E_SRCP/$_tn" ]; then
+      _add "app uid $APP_UID through $_fv: write landed in folder A: ok"
+    else
+      _st=warn
+      _msg="App write through the storage view worked but did not reach folder A (stale view; use Reset media provider)"
+      _add "file written on $_fv is not in $E_SRCP"
+    fi
+    rm -rf "$E_SRCP/$_tn" "$_fv/$_tn" 2>/dev/null
   fi
 
   # 4. label sanity
@@ -1232,7 +1404,7 @@ cmd_bind() {
       [ -f "$BINDCONF" ] || return 0
       while read -r _a _rest; do
         case "$_a" in ""|\#*) continue ;; esac
-        entry_get "$_a" && echo "entry=$E_ID|$(entry_state "$E_ID")|$E_MODE|$E_AUTO|$E_SRC|$E_DST|$E_OWNER|$E_STOP|${E_PKG:-}"
+        entry_get "$_a" && echo "entry=$E_ID|$(entry_state "$E_ID")|$E_MODE|$E_AUTO|$E_SRC|$E_DST|$E_OWNER|$E_STOP|${E_PKG:-}|$E_MOVE"
       done < "$BINDCONF" ;;
     add)
       _id=$1; _s=$2; _dd=$3; [ $# -ge 3 ] && shift 3
@@ -1303,25 +1475,227 @@ cmd_bind() {
 # ------------------------------------------------------------------------------
 # Make files reachable for Android's media daemon (gid media_rw = 1023). The share root is setgid
 # media_rw, so the daemon is in the *group* class of every file: the "other" bits do not apply to it.
-fx() { find "$TARGET" -xdev ! -type l -exec "$@" {} + 2>&1 | tail -n 3; }
+fx() { find "$FX_ROOT" -xdev ! -type l -exec "$@" {} + 2>&1 | tail -n 3; }
+
+media_uid() { # uid of Android's MediaProvider (the identity that serves /sdcard)
+  _mu=$(pkg_uid com.google.android.providers.media.module)
+  [ -z "$_mu" ] && _mu=$(pkg_uid com.android.providers.media.module)
+  [ -z "$_mu" ] && _mu=10234
+  echo "$_mu"
+}
+
+stop_scan() { # stop a background permission scan (called before an unmount)
+  _sp=$(cat "$DATA_DIR/.scan.pid" 2>/dev/null)
+  [ -n "$_sp" ] && kill "$_sp" 2>/dev/null
+  rm -f "$DATA_DIR/.scan.pid"
+}
+
+# Fix only what Android's media daemon cannot use: group is not media_rw, folders without group rwx + setgid,
+# files without group rw. Entries that are already right are not touched (no endless rewriting).
+# $1 = folder to scan (default: the whole partition). Sets PS_FIXED.
+perm_scan() {
+  _root=${1:-$TARGET}
+  _cf=$DATA_DIR/.fixcount
+  : > "$_cf"
+  FIXCOUNT=$_cf $NICE_CMD find "$_root" -xdev -path "$TARGET/lost+found" -prune -o ! -type l \
+    \( ! -gid 1023 -o \( -type d ! -perm -2070 \) -o \( ! -type d ! -perm -0060 \) \) \
+    -exec sh -c 'chgrp 1023 "$@" 2>/dev/null; chmod g+rwX "$@" 2>/dev/null; for f; do [ -d "$f" ] && chmod g+s "$f" 2>/dev/null; done; echo $# >> "$FIXCOUNT"' sh {} + 2>/dev/null &
+  echo $! > "$DATA_DIR/.scan.pid"
+  wait $!
+  rm -f "$DATA_DIR/.scan.pid"
+  PS_FIXED=0
+  while read -r _n; do PS_FIXED=$((PS_FIXED + _n)); done < "$_cf"
+  rm -f "$_cf"
+}
+
+# One-shot fix right after a successful mount (AUTOFIX_PERMS=1): boot-mount, WebUI/Action mount, partition switch.
+# Runs in the background at lowest priority; at boot it waits until the system has settled (uptime >= 120 s).
+autofix_on_mount() {
+  [ "$AUTOFIX_PERMS" = "1" ] || return 0
+  mounted_ours || return 0
+  say "[-] Auto-fix permissions: checking $TARGET once (background)"
+  (
+    trap - EXIT
+    if [ -n "$UD_BOOT" ]; then
+      while :; do
+        read -r _up _ < /proc/uptime; _up=${_up%.*}
+        [ "${_up:-0}" -ge 120 ] && break
+        sleep 5
+      done
+    fi
+    mounted_ours || exit 0
+    perm_scan "$TARGET"
+    if [ "$PS_FIXED" -gt 0 ]; then
+      echo "$(date '+%F %T') fixed $PS_FIXED entries" > "$DATA_DIR/autofix.last"
+      _log "autofix: normalised $PS_FIXED entries"
+      if [ -n "$(view_missing)" ]; then
+        _log "autofix: folders still missing in Android's view; restarting MediaProvider"
+        cmd_restart_media >/dev/null 2>&1
+        sleep 3; wake_media
+      fi
+    else
+      echo "$(date '+%F %T') nothing needed fixing" > "$DATA_DIR/autofix.last"
+      _log "autofix: nothing to fix"
+    fi
+  ) >/dev/null 2>&1 </dev/null &
+}
+
+fix_labels() { # only when the mount is not force-labelled (context=): relabel for the media daemon
+  case "$(cat "$DATA_DIR/mount_mode" 2>/dev/null)" in fsctx|plain) ;; *) return 0 ;; esac
+  command -v chcon >/dev/null 2>&1 || return 0
+  say "[-] SELinux: the mount is not force-labelled; relabelling $FX_ROOT as media_rw_data_file"
+  chcon -R u:object_r:media_rw_data_file:s0 "$FX_ROOT" 2>&1 | tail -n 3
+}
+
+fix_verify() { # test the result as the Android media daemon
+  _mu=$(media_uid)
+  run_as "$_mu" 1023 true >/dev/null 2>&1
+  if [ $? -eq 99 ]; then say "[~] cannot test as the media daemon here (no setpriv/su uid support)"; return 0; fi
+  _dd=$(run_as "$_mu" 1023 "find '$FX_ROOT' -xdev -type d 2>&1 >/dev/null | grep -c 'Permission denied'")
+  _ff=$(run_as "$_mu" 1023 "find '$FX_ROOT' -xdev -type f 2>/dev/null | head -n 2000 | { n=0; b=0; while read -r f; do n=\$((n+1)); [ -r \"\$f\" ] || b=\$((b+1)); done; echo \"\$b/\$n\"; }")
+  say "[=] As the media daemon (uid $_mu): ${_dd:-?} folder(s) denied, ${_ff%/*} of ${_ff#*/} sampled files unreadable"
+  [ "${_dd:-0}" = "0" ] && [ "${_ff%/*}" = "0" ] && return 0
+  return 1
+}
+
+view_missing() { # names on the partition root that Android's storage view does not list
+  for _vr in /storage/emulated/0 /mnt/user/0/emulated/0; do
+    [ -d "$_vr/Android" ] || continue
+    ls -A "$TARGET" 2>/dev/null | head -n 300 | while IFS= read -r _vn; do
+      [ -e "$_vr/$MOUNT_NAME/$_vn" ] || echo "$_vn"
+    done
+    return 0
+  done
+}
+
 cmd_fixperms() {
   load_conf
   _lvl=${1:-read}
-  case "$_lvl" in read|rw) ;; *) echo "usage: fixperms read|rw"; return 2 ;; esac
+  case "$_lvl" in read|rw) ;; *) echo "usage: fixperms read|rw [folder]"; return 2 ;; esac
   if ! mounted_ours; then
     echo "Mount the partition first."
     return 1
   fi
-  say "[-] fixperms $_lvl on $TARGET: group -> media_rw (1023); group bits +$( [ "$_lvl" = rw ] && echo rwX || echo rX ); directories setgid. Owners are not changed; symlinks are skipped."
+  FX_ROOT=$TARGET
+  if [ -n "$2" ]; then
+    valid_path "$2" || { echo "bad folder name (letters, digits, . _ + - / only; run without a folder for others)"; return 2; }
+    case "$2" in /*|@*) echo "give the folder relative to the partition root"; return 2 ;; esac
+    FX_ROOT=$TARGET/$2
+    [ -d "$FX_ROOT" ] || { echo "no such folder: $2"; return 1; }
+    _acc=$TARGET   # parents must be traversable by the group too
+    for _seg in $(echo "$2" | tr '/' ' '); do
+      _acc=$_acc/$_seg
+      [ -d "$_acc" ] && { chgrp 1023 "$_acc" 2>/dev/null; chmod g+rwx,g+s "$_acc" 2>/dev/null; }
+    done
+  fi
+  stop_scan
+  say "[-] fixperms $_lvl on $FX_ROOT: group -> media_rw (1023); group bits +$( [ "$_lvl" = rw ] && echo rwX || echo rX ); directories setgid. Owners are not changed; symlinks are skipped."
   fx chgrp 1023
   if [ "$_lvl" = "rw" ]; then fx chmod g+rwX; else fx chmod g+rX; fi
-  find "$TARGET" -xdev -type d -exec chmod g+s {} + 2>&1 | tail -n 3
+  find "$FX_ROOT" -xdev -type d -exec chmod g+s {} + 2>&1 | tail -n 3
   chown 1023:1023 "$TARGET" 2>/dev/null
   chmod 2775 "$TARGET" 2>/dev/null
-  say "[+] Done. For permanent sharing (new files too) run ubuntu/setup-sharing.sh inside Ubuntu."
+  fix_labels
+  _vok=0
+  fix_verify && _vok=1
+  _vm=$(view_missing)
+  if [ -n "$_vm" ]; then
+    say "[~] Not listed in Android's storage view: $(echo "$_vm" | head -n 5 | tr '\n' ' ')"
+    say "[-] Restarting MediaProvider so it re-reads the folder..."
+    cmd_restart_media >/dev/null 2>&1
+    sleep 3; wake_media; sleep 2
+    _vm=$(view_missing)
+    if [ -n "$_vm" ]; then
+      say "[!] Still missing in the Android view: $(echo "$_vm" | head -n 5 | tr '\n' ' ')"
+      say "[!] Permissions are not the problem any more. Run: ubuntu-data.sh inspect   (names, case clash, label, symlink)"
+      return 1
+    fi
+    say "[+] Visible in Android now"
+  fi
+  [ $_vok -eq 1 ] || say "[!] The media daemon still cannot use some files. Run: ubuntu-data.sh inspect"
+  say "[+] Done. Files that Ubuntu creates later need this again unless you run ubuntu/setup-sharing.sh once (installs share-fix for Ubuntu), or turn on Auto-fix permissions on mount."
 }
 
-run_as() { # <uid> <gid> <sh command>
+# ---- inspect: why is a folder invisible to Android apps? -------------------------------------
+inspect_line() { # <abs path> <display name>
+  _ip=$1; _in=$2
+  if [ -L "$_ip" ]; then echo "$_in | SYMLINK -> Android storage cannot follow symlinks; copy the real folder"; return; fi
+  _ist=$(stat -c '%A %u:%g' "$_ip" 2>/dev/null)
+  _ilb=$(stat -c '%C' "$_ip" 2>/dev/null)
+  _iw=""
+  case "$_in" in .*) _iw="$_iw hidden-name(dot)" ;; esac
+  case "$_in" in *[:\*\?\"\<\>\|\\]*|*" "|*.) _iw="$_iw name-has-FAT-invalid-chars-or-trailing-space/dot" ;; esac
+  _id=ok; _ideep=0
+  case "$_in" in
+    *\'*) _id="skipped(quote in name)" ;;
+    *)
+      run_as "$_mu" 1023 "if [ -d '$_ip' ]; then [ -r '$_ip' ] && [ -x '$_ip' ]; else [ -r '$_ip' ]; fi" >/dev/null 2>&1
+      _ir=$?
+      if [ $_ir -eq 99 ]; then _id="n/a"; elif [ $_ir -ne 0 ]; then _id=DENIED; fi
+      if [ -d "$_ip" ] && [ "$_id" = ok ]; then
+        _ideep=$(run_as "$_mu" 1023 "$TMO find '$_ip' -xdev -type d 2>&1 >/dev/null | grep -c 'Permission denied'" 2>/dev/null)
+      fi ;;
+  esac
+  _iv=n/a
+  for _vr in /storage/emulated/0 /mnt/user/0/emulated/0; do
+    [ -d "$_vr/Android" ] || continue
+    if [ -e "$_vr/$MOUNT_NAME/${_ip#"$TARGET"/}" ]; then _iv=yes; else _iv=NO; fi
+    break
+  done
+  case "$_ilb" in u:object_r:*) case "$_ilb" in *media_rw_data_file*) ;; *) _iw="$_iw label=$_ilb(not media_rw_data_file)" ;; esac ;; esac
+  echo "$_in | $_ist | daemon:$_id deeper-denied:${_ideep:-0} | android-view:$_iv |${_iw:- none}"
+}
+
+cmd_inspect() {
+  load_conf
+  mounted_ours || { echo "Mount the partition first."; return 1; }
+  _mu=$(media_uid)
+  TMO=""; command -v timeout >/dev/null 2>&1 && TMO="timeout 20"
+  _rel=$1
+  case "$_rel" in "$TARGET"/*) _rel=${_rel#"$TARGET"/} ;; "$TARGET") _rel="" ;; /*) echo "give a path inside $TARGET"; return 2 ;; esac
+  case "$_rel" in *..*) echo "bad path"; return 2 ;; esac
+  echo "mount label : $(cat "$DATA_DIR/mount_mode" 2>/dev/null || echo unknown)   media daemon uid: $_mu (gid 1023)"
+  echo "format      : name | mode owner:group | media daemon | what apps see | warnings"
+  if [ -z "$_rel" ]; then
+    ls -A "$TARGET" 2>/dev/null | head -n 100 | while IFS= read -r _n; do inspect_line "$TARGET/$_n" "$_n"; done
+    _cc=$(ls -A "$TARGET" 2>/dev/null | tr 'A-Z' 'a-z' | sort | uniq -d)
+    [ -n "$_cc" ] && echo "CASE CLASH  : $(echo "$_cc" | tr '\n' ' ') exist twice differing only by upper/lower case. Linux keeps both, Android's storage is case-insensitive and shows only one."
+  else
+    [ -e "$TARGET/$_rel" ] || [ -L "$TARGET/$_rel" ] || { echo "not found: $_rel"; return 1; }
+    _acc=$TARGET
+    for _seg in $(echo "$_rel" | tr '/' ' '); do
+      _acc=$_acc/$_seg
+      inspect_line "$_acc" "${_acc#"$TARGET"/}"
+    done
+    echo "-- first entries inside --"
+    ls -A "$TARGET/$_rel" 2>/dev/null | head -n 15 | while IFS= read -r _n; do inspect_line "$TARGET/$_rel/$_n" "$_n"; done
+    _cc=$(ls -A "$TARGET/$_rel" 2>/dev/null | tr 'A-Z' 'a-z' | sort | uniq -d)
+    [ -n "$_cc" ] && echo "CASE CLASH  : $(echo "$_cc" | tr '\n' ' ') (differ only by case; Android shows only one)"
+  fi
+  echo "-- recent SELinux denials mentioning media/fuse --"
+  dmesg 2>/dev/null | grep -i 'avc: *denied' | grep -i 'media\|fuse' | tail -n 5
+  echo "How to read it: daemon:DENIED -> run Make writable (fixperms rw). daemon:ok but android-view:NO -> Reset media provider,"
+  echo "or a name/case/symlink warning above. Warnings 'label=' -> Make writable relabels it (only on unlabelled mounts)."
+}
+
+run_as() { # <uid> <gid> <sh command>   (RA_GROUPS="g1,g2" = also keep these supplementary groups)
+  if [ -n "$RA_GROUPS" ]; then
+    # verify the groups really apply (some setpriv builds ignore or lack --groups) before trusting a test
+    if command -v setpriv >/dev/null 2>&1; then
+      _ro=$(setpriv --reuid "$1" --regid "$2" --groups "$RA_GROUPS" id -G 2>/dev/null)
+      if ra_has_groups "$_ro" "$RA_GROUPS"; then
+        setpriv --reuid "$1" --regid "$2" --groups "$RA_GROUPS" sh -c "$3"; return $?
+      fi
+    fi
+    _rs=""; for _g in $(echo "$RA_GROUPS" | tr ',' ' '); do _rs="$_rs -G $_g"; done
+    # shellcheck disable=SC2086
+    _ro=$(su -g "$2" $_rs "$1" -c 'id -G' 2>/dev/null)
+    if ra_has_groups "$_ro" "$RA_GROUPS"; then
+      # shellcheck disable=SC2086
+      su -g "$2" $_rs "$1" -c "$3"; return $?
+    fi
+    return 99
+  fi
   if command -v setpriv >/dev/null 2>&1; then
     setpriv --reuid "$1" --regid "$2" --clear-groups sh -c "$3"
   elif su "$1" -c true >/dev/null 2>&1; then
@@ -1329,6 +1703,14 @@ run_as() { # <uid> <gid> <sh command>
   else
     return 99
   fi
+}
+
+ra_has_groups() { # <output of id -G> <g1,g2,...>: every wanted group is in the list
+  [ -n "$1" ] || return 1
+  for _w in $(echo "$2" | tr ',' ' '); do
+    case " $1 " in *" $_w "*) ;; *) return 1 ;; esac
+  done
+  return 0
 }
 
 cmd_access() {
@@ -1440,11 +1822,12 @@ cmd_diag() {
   echo "== target =="; ls -ldZ "$TARGET" 2>&1; ls -A "$TARGET" 2>&1 | head -n 10
   echo "== android view =="; echo "view=$(android_view)"; ls -ldZ /storage/emulated/0/$MOUNT_NAME 2>&1
   echo "== namespaces =="; echo "self=$(readlink /proc/self/ns/mnt) init=$(readlink /proc/1/ns/mnt 2>&1)"
+  echo "== inspect folders =="; if mounted_ours; then cmd_inspect ""; else echo "not mounted"; fi
   echo "== log tail =="; tail -n 25 "$LOG" 2>/dev/null
 }
 
 cmd_set() {
-  case "$1" in AUTOMOUNT|FIX_ROOT_PERMS|DISABLE_DATA_MOUNT) ;; *) echo "unsupported key"; return 2 ;; esac
+  case "$1" in AUTOMOUNT|FIX_ROOT_PERMS|DISABLE_DATA_MOUNT|AUTOFIX_PERMS) ;; *) echo "unsupported key"; return 2 ;; esac
   case "$2" in 0|1) ;; *) echo "value must be 0 or 1"; return 2 ;; esac
   conf_put "$1" "$2"
   echo "$1=$2"
@@ -1487,6 +1870,26 @@ cmd_mkdir() { # <abs dir> : only inside the partition or internal storage
 
 cmd_log() {
   tail -n "${1:-60}" "$LOG" 2>/dev/null
+}
+
+# Save the whole log (plus a status header) to the public Download folder so it can be shared.
+cmd_log_export() {
+  _ld=$SD_BASE/Download
+  mkdir -p "$_ld" 2>/dev/null
+  [ -d "$_ld" ] || { echo "cannot create $_ld (device not unlocked yet?)"; return 1; }
+  _lf=$_ld/mount_ubuntu_data_log_$(date '+%Y%m%d_%H%M%S').txt
+  {
+    echo "Mount Ubuntu Data $(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null)"
+    echo "exported: $(date '+%F %T')"
+    echo "---- status ----"
+    cmd_status
+    echo "---- mount.log ----"
+    cat "$LOG" 2>/dev/null
+  } > "$_lf" 2>/dev/null || { echo "could not write $_lf"; return 1; }
+  chown 1023:1023 "$_lf" 2>/dev/null
+  chmod 0660 "$_lf" 2>/dev/null
+  am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://${_lf}" >/dev/null 2>&1
+  echo "Saved: /sdcard/Download/${_lf##*/}"
 }
 
 # ------------------------------------------------------------------------------
@@ -1664,7 +2067,8 @@ main() {
     partition)     cmd_partition "$@"; exit $? ;;
     browse)        cmd_browse "$1"; exit $? ;;
     mkdir)         cmd_mkdir "$1"; exit $? ;;
-    fixperms)      cmd_fixperms "$1" ;;
+    fixperms)      cmd_fixperms "$1" "$2"; exit $? ;;
+    inspect)       cmd_inspect "$1"; exit $? ;;
     access)        cmd_access ;;
     layout)        cmd_layout ;;
     fsck)          cmd_fsck ;;
@@ -1672,6 +2076,7 @@ main() {
     fixview)       cmd_fixview; exit $? ;;
     diag)          cmd_diag ;;
     log)           cmd_log "$1" ;;
+    log-export)    cmd_log_export; exit $? ;;
     boot-mount)    cmd_boot_mount ;;
     daemon)        cmd_daemon ;;
     init-config)   : ;;
