@@ -1025,19 +1025,13 @@
                   <div id="fDstV" class="val">Not selected</div><button id="fDstB" type="button">Select…</button>
                 </div>
               </div>
-              <label>Method
-                <select id="fMode">
-                  <option value="bind">Bind mount (real mount, works everywhere)</option>
-                  <option value="vfs">Hybrid Mount VFS redirect (one app only, experimental)</option>
-                </select></label>
               <label class="chk"><input id="fOwner" type="checkbox" checked><span>Let the target app read and write folder A
                   <small>Turn this on when folder B is an app's own folder (<code>Android/data/&lt;package&gt;</code> or <code>Android/obb/&lt;package&gt;</code>): the top of folder A is handed to that app (chown, mode 2770). Nothing else is changed.</small></span></label>
-              <label id="fMoveRow" class="chk"><input id="fMove" type="checkbox"><span>Move existing files from folder B into folder A
+              <label class="chk"><input id="fMove" type="checkbox"><span>Move existing files from folder B into folder A
                   <small>On mount, whatever already sits in folder B is moved onto the Ubuntu side first, so mounting does not hide it. Names that already exist in folder A stay in B.</small></span></label>
               <label class="chk"><input id="fStop" type="checkbox"><span>Stop the app when mounting/unmounting
                   <small>Force-stops the app so it picks up the new folder instead of keeping the old view.</small></span></label>
               <label class="chk"><input id="fAuto" type="checkbox" checked><span>Mount at boot</span></label>
-              <div id="fHint" class="hint"></div>
               <button id="fAdd" class="primary">Add</button>
               <button id="fCancel" type="button" class="hidden">Cancel editing</button>
             </div>
@@ -1234,7 +1228,6 @@
       };
 
       // ---- folder mounts ----------------------------------------------------------
-      let vfsOk = false;
       const PATH_RE = /^[A-Za-z0-9_.@\/+-]+$/, ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
       let editing = null;   // id of the folder mount being edited, or null when adding
       const pkgFromDst = (d) => { const m = /(?:^|\/)Android\/(?:data|obb)\/([A-Za-z0-9_.]+)/.exec(d || ''); return m ? m[1] : ''; };
@@ -1305,24 +1298,6 @@
         }
       }
 
-      function applyMethodState() {
-        const sel = $('fMode');
-        for (const o of sel.options) o.disabled = o.value !== 'bind' && !vfsOk;
-        if (!vfsOk && !editing) sel.value = 'bind';
-        sel.disabled = !vfsOk && sel.value === 'bind';
-        const isVfs = sel.value === 'vfs';
-        $('fMoveRow').classList.toggle('hidden', isVfs);
-        loadPkgs();
-        $('fHint').textContent = isVfs
-          ? (vfsOk ? 'Hybrid Mount VFS provider is responding.' : 'Hybrid Mount is not available (metamodule or kernel provider missing), so only Bind mount can be used.')
-          : 'Bind mount works across all apps and storage views.';
-      }
-      async function checkVfs() {
-        const r = await ud('bind vfs-check');
-        vfsOk = r.code === 0;
-        applyMethodState();
-      }
-      $('fMode').addEventListener('change', applyMethodState);
       $('fPkg').addEventListener('input', () => {
         renderPkgDropdown($('fPkg').value);
       });
@@ -1332,13 +1307,13 @@
       $('fPkg').addEventListener('blur', () => {
         setTimeout(() => { const dd = $('pkgDropdown'); if (dd) dd.classList.add('hidden'); }, 200);
       });
-      $('addbox').addEventListener('toggle', () => { if ($('addbox').open) { checkVfs(); loadPkgs(); } });
+      $('addbox').addEventListener('toggle', () => { if ($('addbox').open) loadPkgs(); });
       function entRow(e) {
         const row = document.createElement('div'); row.className = 'ent';
         const meta = document.createElement('div'); meta.className = 'meta';
         const b = document.createElement('b'); b.textContent = e.id;
         const pill = document.createElement('span'); pill.className = 'pill' + (e.state === 'mounted' ? ' on' : '');
-        pill.textContent = e.state === 'mounted' ? e.mode + ' · on' : e.mode;
+        pill.textContent = e.state === 'mounted' ? 'Mounted' : 'Not mounted';
         b.appendChild(pill);
         if (e.state === 'mounted') b.appendChild(stIcon(e));
         const sm = document.createElement('small'); sm.textContent = e.src + '  →  ' + e.dst;
@@ -1432,7 +1407,6 @@
         editing = e.id;
         $('fId').value = e.id; $('fId').disabled = true;
         setPicked('src', e.src); setPicked('dst', e.dst);
-        $('fMode').value = e.mode === 'vfs' ? 'vfs' : 'bind';
         $('fPkg').value = e.pkg || (pkgFromDst(e.dst) || '');
         $('fOwner').checked = e.owner !== 'none';
         $('fStop').checked = e.stop === '1';
@@ -1441,7 +1415,7 @@
         $('fAdd').textContent = 'Save changes';
         $('addSum').textContent = 'Edit folder mount: ' + e.id;
         $('fCancel').classList.remove('hidden');
-        $('addbox').open = true; applyMethodState();
+        $('addbox').open = true;
         $('addbox').scrollIntoView({ behavior: 'smooth', block: 'start' });
         if (e.state === 'mounted') toast('It will be unmounted and mounted again when you save');
       }
@@ -1449,10 +1423,10 @@
         editing = null;
         $('fId').disabled = false; $('fId').value = '';
         setPicked('src', ''); setPicked('dst', '');
-        $('fMode').value = 'bind'; $('fPkg').value = ''; const dd = $('pkgDropdown'); if (dd) dd.classList.add('hidden');
+        $('fPkg').value = ''; const dd = $('pkgDropdown'); if (dd) dd.classList.add('hidden');
         $('fOwner').checked = true; $('fStop').checked = false; $('fMove').checked = false; $('fAuto').checked = true;
         $('fAdd').textContent = 'Add'; $('addSum').textContent = 'Add folder mount';
-        $('fCancel').classList.add('hidden'); applyMethodState();
+        $('fCancel').classList.add('hidden');
       }
       $('fCancel').onclick = () => { endEdit(); $('addbox').open = false; };
 
@@ -1575,9 +1549,8 @@
         if (!ID_RE.test(id)) return toast('Name: letters, digits, - and _');
         if (!PATH_RE.test(src) || src.includes('..')) return toast('Folder A has invalid characters');
         if (!PATH_RE.test(dst) || dst.includes('..')) return toast('Folder B has invalid characters');
-        const mode = $('fMode').value, pkg = $('fPkg').value.trim();
-        if (mode === 'vfs' && !PKG_RE.test(pkg)) return toast('Enter the app package, e.g. com.example.game');
-        const opts = ['mode=' + mode, ...(pkg ? ['pkg=' + pkg] : []), 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'move=' + (mode === 'bind' && $('fMove').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
+        const pkg = $('fPkg').value.trim();
+        const opts = [...(pkg ? ['pkg=' + pkg] : []), 'owner=' + ($('fOwner').checked ? 'auto' : 'none'), 'stop=' + ($('fStop').checked ? 1 : 0), 'move=' + ($('fMove').checked ? 1 : 0), 'auto=' + ($('fAuto').checked ? 1 : 0)];
         const wasEdit = !!editing;
         const r = await ud(['bind', wasEdit ? 'edit' : 'add', id, src, dst, ...opts].join(' '));
         if (r.code !== 0) { showOut(r.out + r.err); return toast(wasEdit ? 'Not saved' : 'Not added'); }
@@ -1630,7 +1603,7 @@
       // ---- boot ------------------------------------------------------------------
       if (!hasBridge) { $('nobridge').classList.remove('hidden'); $('stateText').textContent = 'No root bridge'; $('main').textContent = 'Unavailable'; }
       else {
-        refresh(); loadEntries(); checkVfs();
+        refresh(); loadEntries();
         timer = setInterval(() => { if (!document.hidden) { refresh(); loadEntries(); } }, 4000);
         document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
       }
