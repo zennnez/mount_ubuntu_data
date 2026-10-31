@@ -40,7 +40,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          tag="v${{ steps.prop.outputs.version }}"
+          tag="${{ steps.prop.outputs.version }}"
           zip=$(ls *.zip | head -n 1)
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$zip" --clobber
