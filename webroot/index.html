@@ -320,6 +320,11 @@
       transform: translateX(20px);
     }
 
+    .sw input:disabled+span {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
     pre {
       margin: 0;
       padding: 12px;
@@ -936,14 +941,14 @@
             <div class="meter-l"><span id="usedL"></span><span id="freeL"></span></div>
           </div>
           <dl>
-            <dt>Partition</dt>
-            <dd id="vDev">–</dd>
-            <dt>Filesystem</dt>
-            <dd id="vFs">–</dd>
-            <dt>Detected as</dt>
+            <dt>Mount mode</dt>
+            <dd id="vMode">–</dd>
+            <dt>Partition Detected</dt>
             <dd id="vLayout">–</dd>
             <dt>Android path</dt>
             <dd id="vSd">–</dd>
+            <dt>Filesystem</dt>
+            <dd id="vFs">–</dd>
             <dt>Visible in Android</dt>
             <dd id="vView">–</dd>
             <dt>Extra bind mounts</dt>
@@ -961,11 +966,51 @@
               hard brick.</p>
           </div>
           <div class="form">
+            <div>
+              <div class="lbl">Mount mode</div>
+              <div class="pkg-picker-wrap">
+                <input id="mMiniModeInput" type="text" readonly value="External SD Card (Recommended)" style="cursor:pointer" autocapitalize="off" autocomplete="off" spellcheck="false">
+                <div id="modeDropdown" class="pkg-dropdown hidden">
+                  <div class="pkg-item" data-mode="sdcard">
+                    <div class="pkg-item-name">External SD Card (Recommended)</div>
+                    <div class="pkg-item-pkg">Mounts as external physical SD card (/storage/XXXX-XXXX) with native Android app compatibility</div>
+                  </div>
+                  <div class="pkg-item" data-mode="internal">
+                    <div class="pkg-item-name">Internal Storage Folder</div>
+                    <div class="pkg-item-pkg">Mounts into /sdcard/&lt;folder&gt; (classic bind mount)</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="rowMountName" class="form hidden" style="margin-top:0">
+              <label>Internal storage folder name <small>(/sdcard/…)</small>
+                <input id="mName" type="text" value="ubuntu" maxlength="36" autocapitalize="off" autocomplete="off"
+                  spellcheck="false" enterkeyhint="done"></label>
+            </div>
             <label>Partition name <small>(/dev/block/by-name/…)</small>
               <input id="pName" type="text" value="data" maxlength="36" autocapitalize="off" autocomplete="off"
                 spellcheck="false" enterkeyhint="done"></label>
-            <div id="pHint" class="hint">Press Enter or tap outside the field to apply. The name is checked (must exist
-              and be ext4), then the current partition is unmounted and the new one mounted.</div>
+            <div id="pHint" class="hint">Press Enter or tap outside to apply. Partition must exist and be ext4 or exFAT.</div>
+            <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
+              <div class="lbl">Format partition <small>(erase and create clean filesystem)</small></div>
+              <div class="pkg-picker-wrap">
+                <input id="fmtFsInput" type="text" readonly value="ext4 (Linux native, fast)" style="cursor:pointer" autocapitalize="off" autocomplete="off" spellcheck="false">
+                <div id="fmtDropdown" class="pkg-dropdown hidden">
+                  <div class="pkg-item" data-fs="ext4">
+                    <div class="pkg-item-name">ext4</div>
+                    <div class="pkg-item-pkg">Linux native filesystem with POSIX permissions & journaling (recommended for Ubuntu)</div>
+                  </div>
+                  <div class="pkg-item" data-fs="exfat">
+                    <div class="pkg-item-name">exFAT</div>
+                    <div class="pkg-item-pkg">Cross-platform filesystem natively supported by Android and Windows</div>
+                  </div>
+                </div>
+              </div>
+              <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+                <button id="btnFormat" type="button" class="primary danger" style="width:auto;padding:10px 18px;border-radius:10px;font-size:14px;min-height:unset">Format Partition</button>
+                <span id="fmtStatus" class="hint" style="margin:0"></span>
+              </div>
+            </div>
           </div>
           <div class="setrow">
             <div class="row">
@@ -1136,9 +1181,15 @@
       function render(s) {
         cur = s;
         const st = s.state || 'unknown';
+        const isSd = s.mount_mode !== 'internal';
+        $('vMode').textContent = isSd ? 'External SD Card' : 'Internal Folder';
+        $('mMiniModeInput').value = isSd ? 'External SD Card (Recommended)' : 'Internal Storage Folder';
+        $('rowMountName').classList.toggle('hidden', isSd);
+        if (document.activeElement !== $('mName')) $('mName').value = s.mount_name || 'ubuntu';
+        $('mName').disabled = busy;
+        $('mMiniModeInput').disabled = busy;
         $('dot').className = 'dot ' + st;
         $('stateText').textContent = LABEL[st] || 'Unknown';
-        $('vDev').textContent = (s.device || '–') + (s.partname ? ' (' + s.partname + ')' : '');
         $('vLayout').textContent = s.dev_cfg === 'auto' ? (s.layout || ('by-name/' + (s.part_name || 'data') + ' not found')) : 'set manually in config.sh (DEV)';
         $('vFs').textContent = st === 'mounted' ? `${s.fstype || 'ext4'} · ${s.mode || ''}` : '–';
         $('vSd').textContent = s.sdcard_path || '–';
@@ -1162,8 +1213,15 @@
         b.textContent = m ? 'Unmount' : (st === 'absent' ? 'Partition not found' : (st === 'disabled' ? 'Partition mount disabled' : 'Mount'));
         b.disabled = busy || st === 'absent' || st === 'waiting' || st === 'conflict' || st === 'disabled';
         $('auto').checked = s.automount === '1';
-        $('afx').checked = s.autofix_perms === '1';
-        $('afxLast').textContent = s.autofix_perms === '1' ? (s.autofix_last ? 'Last run: ' + s.autofix_last : 'Runs once after each mount; has not run yet.') : '';
+        if (isSd) {
+          $('afx').checked = false;
+          $('afx').disabled = true;
+          $('afxLast').textContent = 'Not needed in External SD Card mode (handled automatically by Android FUSE).';
+        } else {
+          $('afx').checked = s.autofix_perms === '1';
+          $('afx').disabled = busy;
+          $('afxLast').textContent = s.autofix_perms === '1' ? (s.autofix_last ? 'Last run: ' + s.autofix_last : 'Runs once after each mount; has not run yet.') : '';
+        }
         if (document.activeElement !== $('pName') && !pApplying) $('pName').value = s.part_name || 'data';
         $('pName').disabled = busy || pApplying;
         for (const id of ['bFsck', 'bMedia', 'bDiag', 'bLog', 'bLogDl', 'bAccess', 'bRead', 'bWrite']) $(id).disabled = busy;
@@ -1209,6 +1267,7 @@
       };
       $('bFsck').onclick = async () => { if (await confirmBox('Run e2fsck on the unmounted partition? Make sure Ubuntu is not using it.')) run('Checking', 'fsck'); };
       $('afx').onchange = async (ev) => {
+        if (cur.mount_mode !== 'internal') { ev.target.checked = false; return; }
         const on = ev.target.checked;
         if (on && !(await confirmBox('Each time the partition is mounted (at boot or when you press Mount) the module will check it once and give group media_rw read/write access to files whose group or permissions Android cannot use, for example a folder extracted in Ubuntu. At boot it waits until the system has settled. Owners stay the same. Files become readable by apps with "All files access". Turn on?'))) { ev.target.checked = false; return; }
         const r = await ud('set AUTOFIX_PERMS ' + (on ? 1 : 0));
@@ -1226,6 +1285,54 @@
         const r = await run('Saving log', 'log-export');
         toast(r && r.code === 0 ? 'Log saved to Download' : 'Could not save the log');
       };
+
+      // ---- format partition -------------------------------------------------------
+      let selectedFormat = 'ext4';
+      const fmtFsInput = $('fmtFsInput');
+      const fmtDropdown = $('fmtDropdown');
+      if (fmtFsInput && fmtDropdown) {
+        fmtFsInput.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          fmtDropdown.classList.toggle('hidden');
+        });
+        fmtDropdown.querySelectorAll('.pkg-item').forEach((item) => {
+          item.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            selectedFormat = item.dataset.fs || 'ext4';
+            fmtFsInput.value = selectedFormat === 'ext4' ? 'ext4 (Linux native, fast)' : 'exFAT (Cross-platform compatibility)';
+            fmtDropdown.classList.add('hidden');
+          });
+        });
+        document.addEventListener('click', (ev) => {
+          if (!ev.target.closest('.pkg-picker-wrap')) {
+            fmtDropdown.classList.add('hidden');
+            const md = $('modeDropdown');
+            if (md) md.classList.add('hidden');
+          }
+        });
+      }
+      const btnFormat = $('btnFormat');
+      if (btnFormat) {
+        btnFormat.addEventListener('click', async () => {
+          const pn = ($('pName').value || 'data').trim();
+          const ok = await confirmBox(`WARNING: Formatting partition '${pn}' as ${selectedFormat.toUpperCase()} will PERMANENTLY ERASE all files on it!\n\nAre you sure you want to proceed?`);
+          if (!ok) return;
+          btnFormat.disabled = true;
+          $('fmtStatus').textContent = 'Formatting...';
+          const r = await ud(`format ${selectedFormat}`);
+          btnFormat.disabled = false;
+          if (r.code === 0 && r.out.includes('status=ok')) {
+            toast(`Formatted ${pn} as ${selectedFormat}`);
+            $('fmtStatus').textContent = `Formatted as ${selectedFormat}`;
+            setTimeout(() => { $('fmtStatus').textContent = ''; }, 4000);
+            refresh();
+          } else {
+            const msg = (r.out.match(/msg=([^\n]+)/) || [])[1] || r.err || 'Format failed';
+            toast('Format failed: ' + msg);
+            $('fmtStatus').textContent = 'Error: ' + msg;
+          }
+        });
+      }
 
       // ---- folder mounts ----------------------------------------------------------
       const PATH_RE = /^[A-Za-z0-9_.@\/+-]+$/, ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
@@ -1599,6 +1706,41 @@
       }
       $('pName').addEventListener('change', applyPartName);
       $('pName').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('pName').blur(); } });
+
+      // ---- mount mode dropdown ---------------------------------------------------
+      const mMiniModeInput = $('mMiniModeInput');
+      const modeDropdown = $('modeDropdown');
+      if (mMiniModeInput && modeDropdown) {
+        mMiniModeInput.addEventListener('click', (ev) => {
+          if (busy) return;
+          ev.stopPropagation();
+          modeDropdown.classList.toggle('hidden');
+        });
+        modeDropdown.querySelectorAll('.pkg-item').forEach((item) => {
+          item.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            modeDropdown.classList.add('hidden');
+            const mode = item.dataset.mode || 'sdcard';
+            if (mode === (cur.mount_mode || 'sdcard')) return;
+            const isSd = mode === 'sdcard';
+            $('mMiniModeInput').value = isSd ? 'External SD Card (Recommended)' : 'Internal Storage Folder';
+            $('rowMountName').classList.toggle('hidden', isSd);
+            const r = await run('Switching mode', 'set MOUNT_MODE ' + mode);
+            toast(r && r.code === 0 ? ('Switched to ' + (isSd ? 'External SD Card' : 'Internal Folder')) : 'Could not save');
+            refresh();
+          });
+        });
+      }
+
+      async function applyMountName() {
+        if (busy || !hasBridge) return;
+        const name = $('mName').value.trim();
+        if (!name || name === (cur.mount_name || 'ubuntu')) return;
+        const r = await run('Updating path', 'set MOUNT_NAME ' + name);
+        toast(r && r.code === 0 ? 'Saved folder name' : 'Could not save');
+      }
+      $('mName').addEventListener('change', applyMountName);
+      $('mName').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('mName').blur(); } });
 
       // ---- boot ------------------------------------------------------------------
       if (!hasBridge) { $('nobridge').classList.remove('hidden'); $('stateText').textContent = 'No root bridge'; $('main').textContent = 'Unavailable'; }

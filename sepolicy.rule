@@ -5,6 +5,7 @@ allow init media_rw_data_file filesystem *
 allow ksu media_rw_data_file filesystem *
 
 # Allow MediaProvider, system apps, and standard user apps full access to media_rw_data_file and unlabeled
+permissive mediaprovider_app
 allow mediaprovider_app unlabeled dir *
 allow mediaprovider_app unlabeled file *
 allow mediaprovider_app media_rw_data_file dir *

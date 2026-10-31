@@ -4,16 +4,18 @@
 > This module is created for [Ubuntu Linux](https://github.com/TheMojoMan/oneplus-erhai-ubuntu) on **OnePlus Pad 3 only**.
 > Flashing on other devices may cause hard brick.
 
-Mounts the Ubuntu data partition (ext4) at `/data/media/0/ubuntu`, which Android shows as
-**`/sdcard/ubuntu`**. Ubuntu uses the same partition as **`/data`**, so both systems see the same files.
+Mounts the Ubuntu data partition (ext4 or exFAT) as a genuine **External SD Card** (`/storage/<UUID>`) or at `/data/media/0/<MOUNT_NAME>` (**`/sdcard/<MOUNT_NAME>`**). Ubuntu uses the same partition as **`/data`**, so both systems share files seamlessly.
+
+* **External SD Card Mode (Default):** Registers the shared partition as a dedicated removable SD Card in Android (`/storage/<UUID>`), giving maximum app compatibility and separate storage stats in Android Settings.
+* **Internal Folder Mode:** Mounts the shared partition inside internal storage at `/sdcard/<MOUNT_NAME>` (configurable in the WebUI, default: `ubuntu`).
 
 **The partition is found by name:** `/dev/block/by-name/data` (also tried: `/dev/block/bootdevice/by-name/data`).
 Change the name in the WebUI **Partition** box (or `ubuntu-data.sh partition set <name>`): the module checks that the
-partition exists and is ext4, unmounts the current one, saves the new name and mounts the new one right away. If the new one
-cannot be mounted it goes back to the old one. A name that does not exist, is not ext4, is LUKS, or is a protected system
+partition exists and has an ext4 or exFAT filesystem, unmounts the current one, saves the new name and mounts the new one right away. If the new one
+cannot be mounted it goes back to the old one. A name that does not exist, is unformatted, is LUKS, or is a protected system
 partition (userdata, metadata, boot, ...) is refused and nothing changes. Set `DEV=/dev/block/sdaNN` in `config.sh` to bypass
 the name lookup. If the partition does not exist, the module does nothing.
-`ubuntu-data.sh layout` (or the WebUI row "Detected as") shows what the name resolves to.
+`ubuntu-data.sh layout` (or the WebUI row "Partition Detected") shows what the name resolves to.
 
 ## Does Android encryption encrypt this partition?
 
@@ -127,13 +129,14 @@ This module uses standard Linux ext4 partition mounting and bind mounts (`mount 
 
 | Key | Default | Meaning |
 |---|---|---|
+| `MOUNT_MODE` | `sdcard` | `sdcard` (native External SD Card `/storage/<UUID>`) or `internal` (`/sdcard/<MOUNT_NAME>`) |
 | `DEV` | `auto` | block device, or `auto` = `/dev/block/by-name/<PART_NAME>` |
 | `PART_NAME` | `data` | partition name under `/dev/block/by-name/` (WebUI: Mount Settings) |
+| `MOUNT_NAME` | `ubuntu` | folder in internal storage when using `internal` mode (`/sdcard/<MOUNT_NAME>`) |
 | `PUBLISH_TOOLS` | `1` | copy the Ubuntu helper to `/.ubuntu-data-tools/` on the partition |
-| `MOUNT_NAME` | `ubuntu` | folder in internal storage |
 | `AUTOMOUNT` | `0` | mount after boot/unlock (off by default; switch it on in the WebUI) |
 | `FIX_ROOT_PERMS` | `1` | chown root of partition to media_rw, setgid |
-| `AUTOFIX_PERMS` | `0` | `1` = once after every mount (boot-mount and manual mount) fix files Android cannot use (e.g. extracted archives) |
+| `AUTOFIX_PERMS` | `0` | `1` = once after every mount (boot-mount and manual mount) fix files Android cannot use (internal mode only; disabled in External SD Card mode) |
 | `DISABLE_DATA_MOUNT` | `0` | `1` = never mount the partition (dual boot Android + Linux option only) |
 | `EXTRA_BINDS` | empty | legacy `"src:dst ..."` bind mounts; prefer Folder mounts |
 

@@ -35,6 +35,9 @@ ui_print "Mount Ubuntu Data  ${_ver:-}"
 # repo files that must not end up on the device
 rm -f "$MODPATH/.gitattributes" "$MODPATH/.editorconfig" "$MODPATH/pack.py"
 
+# stop any running daemon from earlier versions so new scripts take effect immediately
+pkill -f "ubuntu-data.sh.*daemon" 2>/dev/null || true
+
 ui_print "- Setting permissions..."
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/ubuntu-data.sh" 0 0 0755
