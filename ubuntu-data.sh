@@ -599,10 +599,15 @@ publish_tools() {
 
 apply_sepolicy() {
   _r="$MODDIR/sepolicy.rule"
+  [ -f "$_r" ] || _r="/data/adb/modules/$MODID/sepolicy.rule"
   [ -f "$_r" ] || return 0
-  if [ -x /data/adb/ksu/bin/ksud ]; then
-    /data/adb/ksu/bin/ksud sepolicy apply "$_r" >/dev/null 2>&1
-  elif command -v magiskpolicy >/dev/null 2>&1; then
+  for _k in /data/adb/ksu/bin/ksud /data/adb/ksud /data/adb/ap/bin/ksud; do
+    if [ -x "$_k" ]; then
+      "$_k" sepolicy apply "$_r" >/dev/null 2>&1
+      return 0
+    fi
+  done
+  if command -v magiskpolicy >/dev/null 2>&1; then
     magiskpolicy --live --apply "$_r" >/dev/null 2>&1
   elif command -v supolicy >/dev/null 2>&1; then
     supolicy --live --apply "$_r" >/dev/null 2>&1
@@ -986,7 +991,21 @@ pkg_uid() {
   done
 }
 
+ensure_parents_traversable() {
+  _p=$(dirname "$1" 2>/dev/null)
+  while [ -n "$_p" ] && [ "$_p" != "/" ] && [ "$_p" != "." ]; do
+    case "$_p" in
+      "$TARGET"|"$STAGING_DIR"|"$SD_BASE") break ;;
+      "$TARGET"/*|"$STAGING_DIR"/*|"$SD_BASE"/*)
+        chmod a+rx "$_p" 2>/dev/null
+        _p=$(dirname "$_p" 2>/dev/null) ;;
+      *) break ;;
+    esac
+  done
+}
+
 entry_apply_owner() {
+  ensure_parents_traversable "$E_SRCP"
   case "$E_OWNER" in
     none|"")
       chown 1023:1023 "$E_SRCP" 2>/dev/null
@@ -1257,8 +1276,13 @@ entry_test() {
   entry_get "$1" || { echo "status=off"; echo "msg=no such folder mount"; return 1; }
   if [ "$(entry_state "$E_ID")" != "mounted" ]; then echo "status=off"; echo "msg=Not mounted"; return 0; fi
   _dst=$(entry_dsts | head -n 1)
+  if [ -n "$E_REL" ]; then
+    _app_dst="/storage/emulated/0/$E_REL"
+  else
+    _app_dst="$E_DST"
+  fi
   _tn=.ud_rw_test_$$
-  _st=ok; _msg="Read and write work (as root and as the Android media daemon)"
+  _st=ok; _msg="Read and write work (as root and as the app / media daemon)"
   _det=""
   _add() { _det="$_det
 detail=$*"; }
@@ -1289,24 +1313,34 @@ detail=$*"; }
   _appdone=0
   if [ "$_rootok" = 1 ] && app_identity; then
     _appdone=1
-    _muid=$(media_uid)
-    rm -rf "$_dst/$_tn.d" "$_dst/$_tn" 2>/dev/null
-    RA_GROUPS="1023,1078,1079,9997"
-    _o=$(run_as "$_muid" 1023 "id; mkdir '$_dst/$_tn.d' && echo ok > '$_dst/$_tn' && [ \"\$(cat '$_dst/$_tn')\" = ok ]" 2>&1)
+    rm -rf "$_app_dst/$_tn.d" "$_app_dst/$_tn" 2>/dev/null
+    RA_GROUPS="9997,$APP_GID"
+    _actx=$(ps -efZ 2>/dev/null | grep -F "$E_PKG" | grep -v grep | head -n 1 | awk '{print $1}')
+    [ -z "$_actx" ] && _actx="u:r:untrusted_app:s0:c512,c768"
+    RA_CONTEXT="$_actx"
+    _o=$(run_as "$APP_UID" "$APP_GID" "id; mkdir '$_app_dst/$_tn.d' && echo ok > '$_app_dst/$_tn' && [ \"\$(cat '$_app_dst/$_tn')\" = ok ]" 2>&1)
     _r=$?
     RA_GROUPS=""
+    RA_CONTEXT=""
     [ $_r -ne 99 ] && _add "ran as: $(echo "$_o" | tr '\n' ' ' | cut -c1-300)"
     if [ $_r -eq 99 ]; then
-      _st=warn; _msg="Root works; cannot test media daemon groups"
+      _st=warn; _msg="Root works; cannot test as app '$E_PKG' (uid $APP_UID)"
     elif [ $_r -ne 0 ]; then
       _st=fail
-      _msg="Permission problem: the Android media daemon cannot write in folder A"
-      _add "as media daemon uid $_muid + groups 1023,1078,1079: create folder/file FAILED"
-      _add "folder A top: $(ls -dn "$E_SRCP" 2>/dev/null)"
+      _avc=$(logcat -d -b all -t 1000 2>/dev/null | grep -E "avc: +denied" | tail -n 2)
+      if [ -n "$_avc" ]; then
+        _msg="Blocked by SELinux: app '$E_PKG' (uid $APP_UID) denied"
+        _add "avc denials: $(echo "$_avc" | tr '\n' ' ')"
+      else
+        _msg="Permission problem: app '$E_PKG' (uid $APP_UID) cannot write in folder B"
+      fi
+      _add "as app uid $APP_UID gid $APP_GID groups 9997,$APP_GID: create folder/file FAILED"
+      _add "folder A: $(ls -dnZ "$E_SRCP" 2>/dev/null)"
+      _add "folder B: $(ls -dnZ "$_app_dst" 2>/dev/null)"
     else
-      _add "media daemon (uid $_muid, groups 1023,1078,1079): ok"
+      _add "app $E_PKG (uid $APP_UID, gid $APP_GID): ok"
     fi
-    rm -rf "$_dst/$_tn.d" "$_dst/$_tn" 2>/dev/null
+    rm -rf "$_app_dst/$_tn.d" "$_app_dst/$_tn" 2>/dev/null
   fi
 
   if [ "$_rootok" = 1 ] && [ "$_appdone" = 0 ]; then
@@ -1467,8 +1501,10 @@ autofix_on_mount() {
 }
 
 run_as() {
+  _zopt=""
+  [ -n "$RA_CONTEXT" ] && _zopt="-Z $RA_CONTEXT"
   if [ -n "$RA_GROUPS" ]; then
-    if command -v setpriv >/dev/null 2>&1; then
+    if [ -z "$RA_CONTEXT" ] && command -v setpriv >/dev/null 2>&1; then
       _ro=$(setpriv --reuid "$1" --regid "$2" --groups "$RA_GROUPS" id -G 2>/dev/null)
       if ra_has_groups "$_ro" "$RA_GROUPS"; then
         setpriv --reuid "$1" --regid "$2" --groups "$RA_GROUPS" sh -c "$3"; return $?
@@ -1476,17 +1512,18 @@ run_as() {
     fi
     _rs=""; for _g in $(echo "$RA_GROUPS" | tr ',' ' '); do _rs="$_rs -G $_g"; done
     # shellcheck disable=SC2086
-    _ro=$(su -g "$2" $_rs "$1" -c 'id -G' 2>/dev/null)
+    _ro=$(su $_zopt -g "$2" $_rs "$1" -c 'id -G' 2>/dev/null)
     if ra_has_groups "$_ro" "$RA_GROUPS"; then
       # shellcheck disable=SC2086
-      su -g "$2" $_rs "$1" -c "$3"; return $?
+      su $_zopt -g "$2" $_rs "$1" -c "$3"; return $?
     fi
     return 99
   fi
-  if command -v setpriv >/dev/null 2>&1; then
+  if [ -z "$RA_CONTEXT" ] && command -v setpriv >/dev/null 2>&1; then
     setpriv --reuid "$1" --regid "$2" --clear-groups sh -c "$3"
-  elif su "$1" -c true >/dev/null 2>&1; then
-    su "$1" -c "$3"
+  elif su $_zopt "$1" -c true >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    su $_zopt "$1" -c "$3"
   else
     return 99
   fi
@@ -1702,7 +1739,7 @@ cmd_mkdir() {
   esac
   [ -d "$_mp" ] && { echo "exists"; return 0; }
   mkdir -p "$_mp" 2>/dev/null || { echo "could not create folder"; return 1; }
-  if [ "$_own" = "1" ]; then chown 1023:1023 "$_mp" 2>/dev/null; chmod 2775 "$_mp" 2>/dev/null; fi
+  if [ "$_own" = "1" ]; then chown 1023:1023 "$_mp" 2>/dev/null; chmod 2777 "$_mp" 2>/dev/null; ensure_parents_traversable "$_mp"; fi
   echo "created"
 }
 

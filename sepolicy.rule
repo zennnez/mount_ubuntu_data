@@ -6,6 +6,13 @@ allow ksu media_rw_data_file filesystem *
 
 # Allow MediaProvider, system apps, and standard user apps full access to media_rw_data_file and unlabeled
 permissive mediaprovider_app
+permissive untrusted_app
+permissive untrusted_app_32
+permissive untrusted_app_30
+permissive untrusted_app_29
+permissive untrusted_app_28
+permissive untrusted_app_27
+permissive untrusted_app_25
 allow mediaprovider_app unlabeled dir *
 allow mediaprovider_app unlabeled file *
 allow mediaprovider_app media_rw_data_file dir *
